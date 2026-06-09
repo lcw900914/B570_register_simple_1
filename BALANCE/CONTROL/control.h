@@ -13,7 +13,7 @@
  * asymmetric "dashes/falls forward but recovers backward" behaviour.
  * Tune by binary search: dashes/falls FORWARD -> make MORE NEGATIVE;
  * dashes/falls BACKWARD -> more positive. Steps ~0.5 deg. */
-#define BALANCE_TRIM (-1.4f)
+#define BALANCE_TRIM (0.0f)
 
 /* Motor dead-zone compensation (PWM units, full scale = 7199).
  * The geared motors won't turn below ~600-1000 PWM, so small tilt errors

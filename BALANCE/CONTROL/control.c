@@ -34,6 +34,7 @@ int EXTI0_IRQHandler(void)
 	int brake_target = 0;
 	float angle_error = 0;
 	static u8 Flag_Target;               // Toggles every 5ms to achieve 10ms control period
+	static u8 line_speed_div = 0;
 	static u8 brake_active = 0;
 	static int brake_pwm = 0;
 
@@ -60,8 +61,11 @@ int EXTI0_IRQHandler(void)
 		if(Flag_LineFollow)
 		{
 			correction = IR_GetCorrection();         // PD steering term (reads the 3 sensors)
+			correction = PWM_Limit(correction, 350, -350);  // keep steering from overpowering balance
 			ir_error   = IR_GetLastError();          // error just computed (no re-read)
-			base_speed = LINE_BASE_SPEED;            // forward speed target while tracking
+			line_speed_div++;
+			if(line_speed_div >= 3) line_speed_div = 0;
+			base_speed = (line_speed_div == 0) ? LINE_BASE_SPEED : 0;  // average speed = LINE_BASE_SPEED / 3
 			if(myabs(ir_error) >= 2)                 // sharp turn -> slow down (x0.75)
 				base_speed = base_speed * 3 / 4;
 		}
@@ -97,8 +101,8 @@ int EXTI0_IRQHandler(void)
 		brake_pwm = (brake_pwm * 7 + brake_target) / 8;
 		early_brake = brake_pwm;
 
-		Motor_Left  = Balance_Pwm + Velocity_Pwm + early_brake + correction;
-		Motor_Right = Balance_Pwm + Velocity_Pwm + early_brake - correction;
+		Motor_Left  = Balance_Pwm + Velocity_Pwm + early_brake - correction;
+		Motor_Right = Balance_Pwm + Velocity_Pwm + early_brake + correction;
 
 		Motor_Left  = PWM_Limit(Motor_Left,   6900, -6900);      // Clamp to valid PWM range
 		Motor_Right = PWM_Limit(Motor_Right,  6900, -6900);
@@ -117,7 +121,7 @@ Output  : Balance PWM value
 **************************************************************************/
 int Balance(float Angle, float Gyro)
 {
-	float Balance_Kp = 560, Balance_Kd = 18;    // previous damping setup; gyro[1] test caused immediate fall on hardware
+	float Balance_Kp = 560, Balance_Kd = 12;    // softer damping to reduce fore-aft body shake
 	float Angle_bias, Gyro_bias;
 	float abs_bias;
 	float limit_f;
@@ -146,14 +150,14 @@ Function: Velocity PI control - computes PWM correction to maintain
           zero average wheel speed (robot stays on spot)
 Input   : encoder_left  - left wheel encoder count (this 10ms period)
           encoder_right - right wheel encoder count (this 10ms period)
-Output  : Velocity control PWM value
+Output  : Velocity control PWM value??
 **************************************************************************/
 int Velocity(int encoder_left, int encoder_right)
 {
 #ifdef DEBUG_BALANCE_ONLY
 	float Velocity_Kp = 0,   Velocity_Ki = 0;     // DEBUG: speed loop forced OFF -> pure balance (isolation test)
 #else
-	float Velocity_Kp = -50, Velocity_Ki = 0;   // moderate speed damping only; no integral pullback, allow drift
+	float Velocity_Kp = -45, Velocity_Ki = -0.01; // tiny pullback; reduce oscillation while keeping some recovery
 #endif
 	static float velocity, Encoder_Least, Encoder_bias;
 	static float Encoder_Integral;
@@ -262,7 +266,7 @@ void Key(void)
 		else                            // 1st click -> open the window
 		{
 			click_pending = 1;
-			dbl_timer = 5;              // ~300ms at the ~50-80ms main-loop rate (Key() now runs there)
+			dbl_timer = 12;             // ~600ms at the 50ms main-loop rate; easier double-click window
 		}
 		return;
 	}

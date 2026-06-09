@@ -10,12 +10,12 @@
  */
 
 /* PD gains for the steering correction (tune later). */
-#define IR_KP 300
-#define IR_KD 60
+#define IR_KP 700
+#define IR_KD 140
 
 /* Forward speed target used while line-following (velocity-loop units).
  * 0 = steer in place only (safe default). Raise to actually travel the line. */
-#define LINE_BASE_SPEED 0
+#define LINE_BASE_SPEED 1
 
 /* GPIO level that means "black line detected". Flip to 1 if your sensors are active-high. */
 #define IR_BLACK 0

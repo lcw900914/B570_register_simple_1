@@ -171,7 +171,7 @@ void oled_show(void)
 		   turn-right(->)->up, turn-left(<-)->down. */
 		if(shown_dir != 2)
 		{
-			OLED_BigArrow(shown_dir == 1 ? 2 : 3);
+			OLED_BigArrow(shown_dir == 1 ? 3 : 2);
 			OLED_Refresh_Gram();
 			return;
 		}
