@@ -69,7 +69,7 @@ static void run_self_test(void)
 		accel[1] *= accel_sens;
 		accel[2] *= accel_sens;
 		dmp_set_accel_bias(accel);
-		printf("setting bias succesfully ......\r\n");
+		/* (debug printf removed to drop the multi-KB printf library and fit the 32KB limit) */
 	}
 }
 

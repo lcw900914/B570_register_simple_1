@@ -1,11 +1,14 @@
 #include "ir_tracker.h"
 
-/* Master switch - safe default OFF so this module has zero effect on balance
- * until you deliberately enable it. */
-u8 Flag_LineFollow = 0;
+/* Master switch - default ON so the bot line-follows from startup. Double-click
+ * the key to toggle back to pure balance (see Key() in control.c). */
+u8 Flag_LineFollow = 1;
 
 /* Holds the last valid error so a lost line (000) keeps steering the same way. */
 static int last_error = 0;
+
+/* 1 when the most recent read saw all-white (000) = line lost / off the line. */
+static u8 line_lost = 0;
 
 /**************************************************************************
 Function: Configure the three IR sensor pins as input with pull-up.
@@ -44,17 +47,33 @@ Function: Map the L/M/R pattern to a position error. Positive = line is to
 **************************************************************************/
 int IR_GetError(void)
 {
+	static u8 cl = 0, cm = 0, cr = 0;                 // committed (debounced) sensor state
+	static u8 candl = 0, candm = 0, candr = 0, candn = 0; // candidate awaiting confirmation
 	u8 l, m, r;
 	int error;
 	IR_Read(&l, &m, &r);
 
-	if      (l==0 && m==1 && r==0) error =  0;   //  on center
-	else if (l==0 && m==1 && r==1) error =  1;   //  drifting left of line
-	else if (l==0 && m==0 && r==1) error =  2;   //  hard right
-	else if (l==1 && m==1 && r==0) error = -1;   //  drifting right of line
-	else if (l==1 && m==0 && r==0) error = -2;   //  hard left
-	else if (l==1 && m==1 && r==1) error =  0;   //  intersection / all black
-	else                           error = last_error;  // 000 (lost) or odd combo: hold
+	/* Debounce: a new sensor pattern must be read on TWO consecutive calls before
+	 * it is acted on. A single-cycle flicker (noise, reflection, a line edge or a
+	 * tiny gap) therefore can't jerk the steering around. Until a change is
+	 * confirmed, keep steering by the last committed reading. ~1 cycle (~10ms) lag. */
+	if(l == candl && m == candm && r == candr) { if(candn < 2) candn++; }
+	else { candl = l; candm = m; candr = r; candn = 1; }
+	if(candn >= 2) { cl = l; cm = m; cr = r; }        // stable for 2 reads -> commit
+	l = cl; m = cm; r = cr;                            // use the debounced state from here on
+
+	line_lost = (l==0 && m==0 && r==0) ? 1 : 0;  // all white -> line lost (drive straight to search)
+
+	/* Graded: M alone = dead centre (go straight); M + a side = slight drift ->
+	 * GENTLE steer (follows small curves without big weave); a single side with M
+	 * OFF = line fully left the middle -> strong pivot (turn until centred). */
+	if      (l==0 && m==1 && r==0) error =  0;   //  010 dead centre -> straight
+	else if (l==0 && m==1 && r==1) error =  1;   //  011 slightly right -> gentle steer
+	else if (l==0 && m==0 && r==1) error =  2;   //  001 fully right -> pivot
+	else if (l==1 && m==1 && r==0) error = -1;   //  110 slightly left -> gentle steer
+	else if (l==1 && m==0 && r==0) error = -2;   //  100 fully left -> pivot
+	else if (l==1 && m==1 && r==1) error =  0;   //  111 intersection -> straight
+	else                           error = last_error;  // 000 lost / 101 odd: hold
 
 	last_error = error;
 	return error;
@@ -69,6 +88,19 @@ int IR_GetCorrection(void)
 	int error = IR_GetError();
 	int correction = IR_KP * error + IR_KD * (error - prev_error);
 	prev_error = error;
+
+	/* Spin floor: force a minimum differential while turning so the slower
+	 * wheel is driven NEGATIVE (two wheels counter-rotate), not just slowed. */
+	if(error > 0 && correction <  IR_SPIN_MIN) correction =  IR_SPIN_MIN;
+	if(error < 0 && correction > -IR_SPIN_MIN) correction = -IR_SPIN_MIN;
+
+	/* Cap the steering term. At +-2 the raw PD spikes to ~2*IR_KP (~3800), and the
+	 * one-wheel mixing turns that into a NET FORWARD push during the pivot-entry
+	 * confirmation window (~80ms) - the "sees a corner, surges" rush. +-1 curves
+	 * (1*IR_KP) stay under the cap and are unaffected. */
+	if(correction >  IR_CORRECTION_MAX) correction =  IR_CORRECTION_MAX;
+	if(correction < -IR_CORRECTION_MAX) correction = -IR_CORRECTION_MAX;
+
 	return correction;
 }
 
@@ -79,4 +111,13 @@ Function: Return the most recently computed error without re-reading the
 int IR_GetLastError(void)
 {
 	return last_error;
+}
+
+/**************************************************************************
+Function: Report whether the most recent sensor read saw all-white (000),
+          i.e. the line is lost / the bot is off the line.
+**************************************************************************/
+u8 IR_LineLost(void)
+{
+	return line_lost;
 }

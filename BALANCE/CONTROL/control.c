@@ -6,13 +6,15 @@
  * Uncomment to force the speed loop OFF (pure balance) for isolating the
  * "tilts to an angle then dashes forward and falls" fault.
  * Comment it back out for normal operation. */
-/* #define DEBUG_BALANCE_ONLY */
+//#define DEBUG_BALANCE_ONLY    /* normal operation: speed-brake ENABLED (brakes the forward translation when the body leans, countering the "leans forward -> surges to balance" rush) */
 
 /* Forward-speed target for the velocity loop. 0 = hold position (default).
  * Set by the line-follower each cycle (0 when Flag_LineFollow is off). */
-static int Move_Target = 0;
+static int Move_Target = 0;          // ramped forward-speed target actually used by Velocity()
+static int Move_Target_Cmd = 0;      // commanded forward speed (line-follower or Set_Forward_Speed()); Move_Target ramps toward this
+static float Forward_Lean = 0.0f;    // setpoint feed-forward tilt while moving (see FORWARD_LEAN_GAIN)
 static float Balance_Target = Middle_angle;  // Runtime-calibrated balance angle, captured while motors are OFF.
-static u8 Balance_Ready = 0;
+static u8 Balance_Ready = 1;
 static u32 Cal_WindowStartISR = 0;  // g_isr_count at the calibration window start; 200Hz ISR tick = real-time timing
 static float Gyro_Zero = 0.0f;  // stationary gyro offset captured during calibration; removed in Balance()
 volatile u32 g_isr_count = 0;   // diagnostic: counts EXTI ISR entries; stays 0 if the interrupt never fires
@@ -30,13 +32,22 @@ int EXTI0_IRQHandler(void)
 	int Motor_Left, Motor_Right;         // Final PWM values applied to motors
 	int correction = 0, base_speed = 0;  // IR line-follow steering term and forward speed
 	int ir_error = 0;                    // IR position error (this cycle)
-	int early_brake = 0, encoder_sum = 0;
+	int early_brake = 0;
 	int brake_target = 0;
-	float angle_error = 0;
 	static u8 Flag_Target;               // Toggles every 5ms to achieve 10ms control period
-	static u8 line_speed_div = 0;
-	static u8 brake_active = 0;
 	static int brake_pwm = 0;
+	static u8 center_count = 0;          // consecutive centred (010) cycles, counted ONLY after a lost (000) state; debounces the 000->010 re-acquire so it doesn't lurch to full speed
+	static u8 was_lost = 0;              // 1 = the line was just lost (000); cleared by any turn. Gates the 000->010 speed-up delay
+	static u8 was_hard = 0;              // 1 = just came out of a hard turn (+-2); eases the turn-exit speed-up so it doesn't fling off the line after pivoting
+	static u16 lost_count = 0;           // cycles continuously lost (000); drives the lost-recovery escalation (arc -> spin -> stop)
+	static int straight_corr = 0;        // small fading steering residual applied on the straight (010) to smooth the sawtooth
+	static u8 in_pivot = 0;             // 1 = hard tank pivot active
+	static u8 pivot_min_count = 0;      // ignore old-line 010 briefly after pivot starts
+	static u8 pivot_seen_lost = 0;      // pivot can finish only after seeing 000, then 010
+	static int pivot_dir = 0;           // latched hard-turn direction
+	static int last_pivot_dir = 0;      // direction of the most recent committed pivot; used as the search hint when the line vanishes straight to 000 (no last side known)
+	static u8 lost_from_pivot = 0;      // 1 = the 000 began while a pivot was rotating (between old/new line - keep rotating); 0 = blew straight past the corner (line is BEHIND the axle - must BACK UP, no rotation can reach it)
+	static u8 reached_center = 0;       // 1 = have hit centre at least once since the turn started -> later +-1 drifts are gentle fine-align, not a fresh hard turn
 
 	g_isr_count++;                       // diagnostic: every ISR entry, BEFORE the INT==0 guard
 
@@ -46,8 +57,13 @@ int EXTI0_IRQHandler(void)
 
 		Flag_Target = !Flag_Target;
 		Get_Angle();                     // Read IMU and compute tilt angle
-		Encoder_Left  =  Read_Encoder(3); // left NOT negated: forward now reads + on BOTH wheels (was -, which cancelled the right wheel in the velocity loop's L+R sum)
-		Encoder_Right = -Read_Encoder(4); // right encoder
+		/* Encoder channels were SWAPPED in code vs the actual wiring (hand-spin test):
+		 * TIM3 is physically the RIGHT wheel, TIM4 the LEFT. With the old labels the
+		 * negation landed on the wrong wheel and the velocity loop's L+R sum read ~0
+		 * while driving straight -> NO speed feedback, speed brake and exit brake
+		 * never fired -> the chronic forward surge. */
+		Encoder_Right = Read_Encoder(3);  // RIGHT wheel (verified: rolled forward by hand -> counts +)
+		Encoder_Left  = Read_Encoder(4);  // LEFT wheel (verified after the wiring fix: raw counts were already + for forward, so NO negation - with the negation it read - on a hand-forward roll)
 
 		if(Flag_Target == 1)             // Execute control loop every 10ms (skip one 5ms cycle)
 			return 0;
@@ -55,54 +71,332 @@ int EXTI0_IRQHandler(void)
 		/* Key() moved to the main loop (MiniBalance.c): this ISR is unreliable,
 		   so the button is now polled in the always-running main loop. */
 
-		Balance_Pwm  = Balance(Angle_Balance, Gyro_Balance);     // Upright PD control
-
-		/* --- IR line following (differential steering, gated by Flag_LineFollow) --- */
-		if(Flag_LineFollow)
+		/* --- IR line following (differential steering, gated by Flag_LineFollow) ---
+		 * Also gated by Flag_Stop so handling the bot while stopped can't latch a
+		 * pivot that then fires the moment it starts. */
+		if(Flag_LineFollow && Flag_Stop == 0)
 		{
 			correction = IR_GetCorrection();         // PD steering term (reads the 3 sensors)
-			correction = PWM_Limit(correction, 350, -350);  // keep steering from overpowering balance
 			ir_error   = IR_GetLastError();          // error just computed (no re-read)
-			line_speed_div++;
-			if(line_speed_div >= 3) line_speed_div = 0;
-			base_speed = (line_speed_div == 0) ? LINE_BASE_SPEED : 0;  // average speed = LINE_BASE_SPEED / 3
-			if(myabs(ir_error) >= 2)                 // sharp turn -> slow down (x0.75)
-				base_speed = base_speed * 3 / 4;
+
+			/* Pivot lifetime watchdog: a hard pivot ticks down EVERY cycle (not only
+			 * while centred). When the minimum has elapsed, release the latch so
+			 * normal handling resumes - it exits at the next 010, or re-enters a
+			 * fresh pivot if the corner is still hard. Bounds every pivot so a turn
+			 * that never goes all-white (000) can't spin forever. */
+			if(in_pivot)
+			{
+				if(pivot_min_count > 0) pivot_min_count--;
+				if(pivot_min_count == 0)
+				{
+					in_pivot = 0;
+					pivot_seen_lost = 0;
+					pivot_dir = 0;
+				}
+			}
+
+			/* Corners are handled by the ALL-WHITE (000) path now: +-2 no longer
+			 * escalates to a pivot by itself. On this sensor bar (2cm lookahead) a
+			 * real 90deg corner reads 000 almost immediately anyway, and +-2-triggered
+			 * pivots kept false-firing on small curves' over-corrections. Just
+			 * remember which side the line was last fully off-centre - the 000
+			 * pivot uses it as its turn direction. */
+			if(myabs(ir_error) >= 2)
+				last_pivot_dir = (ir_error > 0) ? 1 : -1;
+
+			if(!IR_LineLost()) lost_from_pivot = 0;      // any sighting of the line ends the current lost episode
+
+			if(IR_LineLost() && in_pivot && pivot_dir != 0 && lost_count < LOST_GIVEUP_CYCLES)  // pivoting with the line gone (old line cleared, or lost-search): keep rotating to find the new 010
+			{
+				lost_from_pivot = 1;                  // this 000 happened mid-rotation: between the old and new line, rotation is the right recovery (do NOT back up)
+				pivot_seen_lost = 1;
+				base_speed = 0;                       // motor mixing spins via PIVOT_OUTER/PIVOT_INNER toward pivot_dir
+				center_count = 0;
+				was_lost = 0;
+				was_hard = 1;
+				if(lost_count < 1000) lost_count++;   // KEEP counting while lost-pivoting so a truly lost bot still reaches give-up (was reset to 0 here, which could search forever)
+				straight_corr = 0;
+			}
+			else if(IR_LineLost())                   // all-white (000): line lost -> escalating recovery (brief glide -> pivot-search -> stop)
+			{
+				int dir = (ir_error > 0) ? 1 : (ir_error < 0 ? -1 : 0);  // last seen side (held in last_error)
+				was_lost = 1;                        // a following 010 must wait out the re-acquire delay
+				was_hard = 0;                        // lost path owns the settle now (via was_lost)
+				center_count = 0;
+				straight_corr = 0;                   // no straight residual while lost
+				reached_center = 0;
+				if(lost_count < 1000) lost_count++;
+
+				if(lost_count < LOST_ARC_CYCLES)         // phase 1: brief grace (coast) - a scuff/tiny line gap glides through on momentum; do NOT drive forward, every cm of overrun puts the corner further behind the sensors
+				{
+					correction = dir * IR_LOST_CORRECTION;
+					base_speed = 0;
+					in_pivot = 0;
+					pivot_min_count = 0;
+					pivot_seen_lost = 0;
+					pivot_dir = 0;
+				}
+				else if(dir == 0 && !lost_from_pivot && lost_count < LOST_BACKUP_CYCLES)  // phase 2: blew STRAIGHT past the corner with NO side information (centred -> 000). The vertex is BEHIND the sensor bar and rotation can't reach it - REVERSE until the line comes back under the sensors. (With a known side, skip straight to the pivot: the line is just off to that side.)
+				{
+					correction = 0;
+					base_speed = -LINE_BACKUP_SPEED;
+					in_pivot = 0;
+					pivot_min_count = 0;
+					pivot_seen_lost = 0;
+					pivot_dir = 0;
+				}
+				else if((dir != 0 || last_pivot_dir != 0) && lost_count < LOST_GIVEUP_CYCLES) // phase 3: pivot-search toward the last-seen side (or the previous corner's direction), in short chunks, with the proven one-wheel-back pivot
+				{
+					in_pivot  = 1;
+					pivot_dir = (dir != 0) ? dir : last_pivot_dir;  // centred->000 corners leave NO last side (debounce eats the 1-cycle side blip); assume the same direction as the previous corner - true for an S/180 made of same-direction 90s
+					pivot_seen_lost = 1;                 // already past the old line: exit at the next centred 010
+					if(pivot_min_count == 0) pivot_min_count = LOST_SEARCH_CHUNK;  // rotate in short chunks so finding the line mid-chunk overshoots at most ~1 chunk
+					base_speed = 0;
+				}
+				else                                     // phase 4: give up (or no known side) -> stop searching, just balance on the spot
+				{
+					correction = 0;
+					base_speed = 0;
+					in_pivot = 0;
+					pivot_min_count = 0;
+					pivot_seen_lost = 0;
+					pivot_dir = 0;
+				}
+			}
+			else if(in_pivot && ir_error != 0)       // the 000-pivot caught the line OFF-centre: keep rotating (same latched direction) until it reaches the centre sensor
+			{
+				base_speed = 0;                      // motor mixing keeps spinning via PIVOT_OUTER/PIVOT_INNER toward pivot_dir
+				center_count = 0;
+				was_lost = 0;
+				was_hard = 1;                        // ease the speed-up when we finally re-centre (anti-fling-off)
+				lost_count = 0;
+				straight_corr = 0;
+			}
+			else if(ir_error != 0)                   // 110/011: fresh in-place turn (strong), or post-turn fine-align (gentle)
+			{
+				if(was_hard && reached_center && myabs(ir_error) < 2)  // gentle fine-align for slight +-1 drifts ONLY
+					correction = (ir_error > 0 ? 1 : -1) * IR_FINE_KP;
+				/* else: keep the strong IR_GetCorrection() from above. +-2 is NEVER
+				 * fine-align - it's the line fully off the middle. */
+				base_speed = (myabs(ir_error) >= 2) ? 0 : LINE_DRIFT_SPEED;  // +-2: STOP and steer hard in place - a real corner goes 000 within a few cycles and the 000 pivot takes over; +-1: keep creeping
+				center_count = 0;
+				was_lost = 0;
+				was_hard = 1;                        // a turn happened -> settle (brake + upright gate) when we re-centre
+				lost_count = 0;
+				straight_corr = (ir_error > 0) ? STRAIGHT_TRIM : -STRAIGHT_TRIM;  // seed the fading residual toward this side
+			}
+			else                                     // centred (010)
+			{
+				lost_count = 0;
+				if(in_pivot && (pivot_min_count > 0 || !pivot_seen_lost) && pivot_dir != 0)
+				{
+					base_speed = 0;                  // still clearing the old line; rotate via PIVOT_OUTER/PIVOT_INNER, don't resume forward yet
+					/* pivot_min_count is ticked centrally at the top each cycle */
+					center_count = 0;
+					was_lost = 0;
+					was_hard = 1;
+					straight_corr = 0;
+				}
+				else
+				{
+					in_pivot = 0;                    // fully centred -> pivot complete, resume forward motion
+					pivot_min_count = 0;
+					pivot_seen_lost = 0;
+					pivot_dir = 0;
+					correction = straight_corr;      // gentle fading steering toward the last drift side (anti-sawtooth)
+					straight_corr = straight_corr * 3 / 4;   // decay toward 0 the longer it stays centred
+
+					if(was_lost || was_hard)         // re-acquiring after a lost (000) OR a turn: ease back up to speed
+					{
+						float lean = Angle_Balance - (Balance_Target + BALANCE_TRIM);
+						if(lean < 0) lean = -lean;
+						reached_center = 1;          // centred at least once -> later +-1 drifts become gentle fine-align
+						if(lean >= SETTLE_ANGLE)     // still pitched (leaning) -> NOT settled; hold, or it'll drive forward and rush off
+							center_count = 0;
+						else if(center_count < CENTER_CONFIRM)
+							center_count++;
+						if(center_count >= CENTER_CONFIRM) { base_speed = LINE_BASE_SPEED; was_lost = 0; was_hard = 0; reached_center = 0; }  // centred AND upright -> resume
+						else                                 base_speed = 0;                                             // not settled yet -> balance on spot
+					}
+					else                             // centre reached via a slight drift only -> full speed immediately
+						base_speed = LINE_BASE_SPEED;
+				}
+			}
+
+			Move_Target_Cmd = base_speed;            // line-follower drives the forward command
+
+			/* Active exit-brake: while still settling after a hard turn (was_hard),
+			 * the balance loop drives forward to catch the turn-induced lean and the
+			 * bot rushes off. Counter it by commanding REVERSE proportional to the
+			 * measured forward translation (encoder sum), via the velocity loop
+			 * (balance-consistent, won't pitch it over). Self-cancels once stopped. */
+			if(was_hard)
+			{
+				int esum  = Encoder_Left + Encoder_Right;
+				int brake = 0;
+				if(esum > EXIT_BRAKE_DEADZONE)                  // only a genuine forward rush -> brake; small wobble left alone so it can't ratchet backward
+					brake = -(esum - EXIT_BRAKE_DEADZONE);
+				if(brake < -EXIT_BRAKE_MAX) brake = -EXIT_BRAKE_MAX;
+				Move_Target_Cmd = brake;
+			}
 		}
 		else
 		{
 			correction = 0;
-			base_speed = 0;
-		}
-		Move_Target = base_speed;                    // forward target read by Velocity()
+			/* Move_Target_Cmd is left as set by Set_Forward_Speed() (0 if never called) */
 
-		Velocity_Pwm = Velocity(Encoder_Left, Encoder_Right);    // Speed PI control
+			/* CRITICAL: clear ALL line-follow/pivot state. The motor mixing keys off
+			 * in_pivot, and the watchdog that releases it only runs inside the
+			 * line-follow branch above - so a pivot latched mid-follow (or while
+			 * being handled) used to survive a switch to pure-balance mode and pin
+			 * the outside wheel at +PIVOT_OUTER forever: the bot could not stand
+			 * still and surged forward. Reset everything so balance mode is clean. */
+			in_pivot = 0;
+			pivot_min_count = 0;
+			pivot_seen_lost = 0;
+			pivot_dir = 0;
+			was_hard = 0;
+			was_lost = 0;
+			lost_count = 0;
+			center_count = 0;
+			straight_corr = 0;
+			reached_center = 0;
+			lost_from_pivot = 0;
+		}
+
+		/* Asymmetric speed change: ACCELERATE gradually (so resuming after a turn
+		 * doesn't lurch to full speed and fling the bot off the track), but
+		 * DECELERATE immediately (speed drops the instant a turn is commanded). */
+		if(Turn_Off(Angle_Balance) == 1 || Flag_Stop == 1)
+		{
+			Move_Target_Cmd = 0;
+			Move_Target = 0;
+		}
+		else if(Move_Target_Cmd < Move_Target)
+			Move_Target = Move_Target_Cmd;   // decelerate immediately
+		else
+			Move_Target = PWM_Ramp(Move_Target_Cmd, Move_Target, MOVE_RAMP_STEP);  // accelerate gradually (one MOVE_RAMP_STEP per tick)
+
+		/* Forward-lean feed-forward: bias the balance setpoint into the travel
+		 * direction so the velocity loop does not have to drive the wheels out
+		 * from under the (front-heavy) body. 0 gain leaves original behaviour. */
+		Forward_Lean = (float)Move_Target * FORWARD_LEAN_GAIN;
+		if(Forward_Lean >  FORWARD_LEAN_MAX) Forward_Lean =  FORWARD_LEAN_MAX;
+		if(Forward_Lean < -FORWARD_LEAN_MAX) Forward_Lean = -FORWARD_LEAN_MAX;
+
+		Balance_Pwm  = Balance(Angle_Balance, Gyro_Balance);     // Upright PD control (uses Forward_Lean)
+
+		Velocity_Pwm = Velocity(Encoder_Left, Encoder_Right);    // Speed P(I) control
+
+		/* NOTE: the speed loop is intentionally LEFT ACTIVE during the in-place pivot.
+		 * The pivot is a SYMMETRIC counter-rotation (one wheel +spin, the other
+		 * -spin), so Encoder_Left + Encoder_Right ~= 0 -> the speed loop does NOT
+		 * fight the spin. What it DOES see is any real forward translation, e.g. the
+		 * momentum the bot carries into a turn - and it brakes that, so the bot can
+		 * stop coasting and rotate in place instead of sliding forward first. (It was
+		 * zeroed here back when the pivot was a ONE-wheel reverse, whose asymmetric
+		 * encoders made the loop surge forward.) */
 
 		/* Gentle speed brake only. Hard threshold rescue made the body fall
 		 * immediately on this hardware, so keep the balance loop continuous.
 		 */
-		angle_error = Angle_Balance - (Balance_Target + BALANCE_TRIM);
-		if(angle_error < 0) angle_error = -angle_error;
-		encoder_sum = Encoder_Left + Encoder_Right;
-		if(angle_error > 1.4f)
-			brake_active = 1;
-		else if(angle_error < 0.7f)
-			brake_active = 0;
-
 #ifdef DEBUG_BALANCE_ONLY
 		brake_target = 0;
 #else
-		if(brake_active && myabs(encoder_sum) > 3)
-			brake_target = PWM_Limit(-encoder_sum * 3, 250, -250);
-		else
-			brake_target = 0;
+		{
+			static u8 brake_active = 0;   // hysteresis latch: brakes between the 1.4/0.7 deg thresholds
+			float angle_error;
+			int   encoder_sum;
+
+			angle_error = Angle_Balance - (Balance_Target + BALANCE_TRIM + Forward_Lean);  // deviation from the (lean-adjusted) setpoint, so moving lean doesn't false-trigger the brake
+			if(angle_error < 0) angle_error = -angle_error;
+			encoder_sum = Encoder_Left + Encoder_Right;
+			if(angle_error > 1.4f)       brake_active = 1;
+			else if(angle_error < 0.7f)  brake_active = 0;
+
+			if(brake_active && myabs(encoder_sum) > 3)
+				brake_target = PWM_Limit(-encoder_sum * 3, 250, -250);
+			else
+				brake_target = 0;
+		}
 #endif
 
 		brake_pwm = (brake_pwm * 7 + brake_target) / 8;
 		early_brake = brake_pwm;
 
-		Motor_Left  = Balance_Pwm + Velocity_Pwm + early_brake - correction;
-		Motor_Right = Balance_Pwm + Velocity_Pwm + early_brake + correction;
+		{
+			int common_pwm = Balance_Pwm + Velocity_Pwm + early_brake;
+#ifdef STEER_PIVOT_ONE_WHEEL
+			int inside_corr = correction * STEER_INNER_PERCENT / 100;
+			int outside_corr = correction * STEER_OUTER_PERCENT / 100;
+
+#ifdef HARD_TURN_TANK_PIVOT
+			if(in_pivot)   // the 000-corner pivot (started by the lost path); +-1/+-2 never spin this - they use the gentle mixing below
+			{
+				/* Hard turn: GUARANTEED one-wheel-forward / one-wheel-backward.
+				 * The OUTSIDE wheel runs common_pwm + PIVOT_OUTER (it still carries
+				 * the balance term). The INSIDE wheel is commanded an ABSOLUTE
+				 * reverse of -PIVOT_INNER, NOT an offset off common_pwm.
+				 *
+				 * Why absolute: entering a corner the body leans forward, so the
+				 * balance term is large positive (~500 PWM per degree of lean - 3 deg
+				 * = +1500). An offset of common_pwm - PIVOT_INNER then stays POSITIVE,
+				 * i.e. BOTH wheels drove forward and the bot surged through the corner
+				 * with no visible wheel reversal. Pinning the inside wheel to a real
+				 * reverse makes the pivot actually counter-rotate every time.
+				 * (Trade-off: only the outside wheel balances during the pivot - if it
+				 * now falls forward in corners, lower PIVOT_INNER or raise PIVOT_OUTER.)
+				 * turn_sign follows the latched pivot direction; if it turns the WRONG
+				 * way, negate turn_sign. */
+				/* DIRECTION - settled by the clean field test AFTER the encoder fix
+				 * (the only trustworthy one; every earlier direction experiment ran
+				 * with broken encoder feedback and was misleading): error > 0
+				 * (001/011 side) -> LEFT wheel reverses, RIGHT wheel drives forward.
+				 * The opposite assignment made every turn steer away from the line
+				 * ("轉彎全相反"). Matches the gentle-steer mixing below. */
+				int turn_sign = pivot_dir;
+				if(turn_sign > 0)
+				{
+					Motor_Left  = -(PIVOT_INNER * PIVOT_GAIN_ERRPOS / 100);             // fixed slow reverse
+					Motor_Right = common_pwm + (PIVOT_OUTER * PIVOT_GAIN_ERRPOS / 100); // forward + balance
+				}
+				else if(turn_sign < 0)
+				{
+					Motor_Left  = common_pwm + (PIVOT_OUTER * PIVOT_GAIN_ERRNEG / 100); // forward + balance
+					Motor_Right = -(PIVOT_INNER * PIVOT_GAIN_ERRNEG / 100);             // fixed slow reverse
+				}
+				else
+				{
+					Motor_Left  = common_pwm;
+					Motor_Right = common_pwm;
+				}
+			}
+			else
+#endif
+			/* Gentle steering, SAME yaw direction as the pivot above: correction > 0
+			 * (001/011 side) -> left wheel slows (inside), right wheel speeds up
+			 * (outside). Confirmed by the post-encoder-fix field test - the opposite
+			 * assignment reversed every turn. */
+			if(correction > 0)
+			{
+				Motor_Left  = common_pwm - inside_corr;
+				Motor_Right = common_pwm + outside_corr;
+			}
+			else if(correction < 0)
+			{
+				Motor_Left  = common_pwm - outside_corr;  // outside_corr is negative -> speeds the left wheel
+				Motor_Right = common_pwm + inside_corr;   // inside_corr is negative -> slows the right wheel
+			}
+			else
+			{
+				Motor_Left  = common_pwm;
+				Motor_Right = common_pwm;
+			}
+#else
+			Motor_Left  = common_pwm - correction;  // direction matched to the pivot orientation above (post-encoder-fix field test)
+			Motor_Right = common_pwm + correction;
+#endif
+		}
 
 		Motor_Left  = PWM_Limit(Motor_Left,   6900, -6900);      // Clamp to valid PWM range
 		Motor_Right = PWM_Limit(Motor_Right,  6900, -6900);
@@ -121,43 +415,35 @@ Output  : Balance PWM value
 **************************************************************************/
 int Balance(float Angle, float Gyro)
 {
-	float Balance_Kp = 560, Balance_Kd = 12;    // softer damping to reduce fore-aft body shake
+	float Balance_Kp = 500, Balance_Kd = 1.5;  
 	float Angle_bias, Gyro_bias;
-	float abs_bias;
-	float limit_f;
-	int   balance_limit;
 	int   balance;
 
-	Angle_bias = (Balance_Target + BALANCE_TRIM) - Angle;   // calibrated setpoint + manual trim, minus current angle
-	Gyro_bias  = 0 - (Gyro - Gyro_Zero);          // remove the stationary gyro offset captured at calibration
-	balance    = Balance_Kp * Angle_bias + Gyro_bias * Balance_Kd;   // PD output (direction flipped: wheels now drive toward the lean)
+	Angle_bias = (Balance_Target + BALANCE_TRIM + Forward_Lean) - Angle;   
+	Gyro_bias  = 0 - (Gyro - Gyro_Zero);          
+	balance    = Balance_Kp * Angle_bias + Gyro_bias * Balance_Kd;   
 
-	/* Nonlinear catch with a smooth limit:
-	 * small errors stay gentle; larger errors get more authority without a hard
-	 * step in PWM that can show up as a jerk.
-	 */
-	abs_bias = Angle_bias;
-	if(abs_bias < 0) abs_bias = -abs_bias;
-	limit_f = 1100.0f + abs_bias * 350.0f;
-	if(limit_f > 2800.0f) limit_f = 2800.0f;   // lower max catch force to prevent growing oscillation
-	balance_limit = (int)limit_f;
-	balance = PWM_Limit(balance, balance_limit, -balance_limit);
+	/* --- ????! --- */
+	balance = PWM_Limit(balance, 6900, -6900);
+	
 	return balance;
 }
+
+
 
 /**************************************************************************
 Function: Velocity PI control - computes PWM correction to maintain
           zero average wheel speed (robot stays on spot)
 Input   : encoder_left  - left wheel encoder count (this 10ms period)
           encoder_right - right wheel encoder count (this 10ms period)
-Output  : Velocity control PWM value??
+Output  : Velocity control PWM value
 **************************************************************************/
 int Velocity(int encoder_left, int encoder_right)
 {
 #ifdef DEBUG_BALANCE_ONLY
-	float Velocity_Kp = 0,   Velocity_Ki = 0;     // DEBUG: speed loop forced OFF -> pure balance (isolation test)
+	float Velocity_Kp = 0,    Velocity_Ki = 0;             // DEBUG: speed loop truly OFF -> pure balance (isolation test). (Was -160/-0.8 by mistake, i.e. NOT off.)
 #else
-	float Velocity_Kp = -45, Velocity_Ki = -0.01; // tiny pullback; reduce oscillation while keeping some recovery
+	float Velocity_Kp = -160, Velocity_Ki = VELOCITY_KI;   // speed damping; Ki off by default (see VELOCITY_KI) to avoid launch
 #endif
 	static float velocity, Encoder_Least, Encoder_bias;
 	static float Encoder_Integral;
@@ -177,9 +463,15 @@ int Velocity(int encoder_left, int encoder_right)
 
 	velocity = -Encoder_bias * Velocity_Kp - Encoder_Integral * Velocity_Ki;
 
-	/* Reset integrator when motors are disabled or stopped */
-	if(Turn_Off(Angle_Balance) == 1 || Flag_Stop == 1)
+	/* Reset integrator when motors are disabled/stopped, OR while line-following
+	 * with no forward command (turn/settle/lost). Otherwise the integral winds up
+	 * negative from the prior forward motion when Move_Target drops to 0, then
+	 * drives the bot BACKWARD to "pull its position back" - the unwanted reversing. */
+	if(Turn_Off(Angle_Balance) == 1 || Flag_Stop == 1 || (Flag_LineFollow && Move_Target == 0))
+	{
 		Encoder_Integral = 0;
+		Encoder_bias     = 0;   // also clear the low-pass memory so a pivot's "moving backward" reading doesn't blip forward on exit
+	}
 
 	return velocity;
 }
@@ -231,29 +523,22 @@ int PWM_Ramp(int target, int current, int step)
 	return target;
 }
 
-int PWM_Slew(int target, int current, int accel_step, int brake_step)
-{
-	int step;
-
-	if((target > 0 && current < 0) || (target < 0 && current > 0))
-		step = brake_step;
-	else if(myabs(target) < myabs(current))
-		step = brake_step;
-	else
-		step = accel_step;
-
-	return PWM_Ramp(target, current, step);
-}
-
 /**************************************************************************
 Function: Toggle the robot stop state when the key is pressed
 Input   : none
 Output  : none
 **************************************************************************/
+/* Double-click window in g_isr_count ticks (200Hz ISR -> 5ms each). 80 = 400ms.
+ * REAL-TIME based on purpose: the old version counted main-loop iterations, so
+ * the window's real duration depended on how fast oled_show() runs - enabling
+ * compiler -O3 sped the loop up and shrank the window to ~250ms, making the
+ * double-click nearly impossible to hit. ISR ticks don't care about loop speed. */
+#define DBL_CLICK_TICKS 80
+
 void Key(void)
 {
 	static u8  click_pending = 0;   // waiting to see if a 2nd click arrives
-	static u16 dbl_timer     = 0;   // double-click window countdown (10ms ticks)
+	static u32 click_isr     = 0;   // g_isr_count at the 1st click
 	u8 tmp = click();
 
 	if(tmp == 1)
@@ -266,20 +551,16 @@ void Key(void)
 		else                            // 1st click -> open the window
 		{
 			click_pending = 1;
-			dbl_timer = 12;             // ~600ms at the 50ms main-loop rate; easier double-click window
+			click_isr = g_isr_count;
 		}
 		return;
 	}
 
-	if(click_pending)                   // window running, no 2nd click yet
-	{
-		if(dbl_timer > 0) dbl_timer--;
-		if(dbl_timer == 0)              // window closed -> it was a SINGLE click
-		{
-			if(Flag_Stop == 0 || Balance_Ready)
-				Flag_Stop = !Flag_Stop; // only allow ON after calibration is ready
-			click_pending = 0;
-		}
+	if(click_pending && (u32)(g_isr_count - click_isr) >= DBL_CLICK_TICKS)
+	{                                   // window expired with no 2nd click -> SINGLE click
+		if(Flag_Stop == 0 || Balance_Ready)
+			Flag_Stop = !Flag_Stop;     // only allow ON after calibration is ready
+		click_pending = 0;
 	}
 }
 
@@ -292,7 +573,7 @@ Output  : 1 if motors should be off, 0 if normal operation
 u8 Turn_Off(float angle)
 {
 	u8 temp;
-	if(angle < -40 || angle > 40 || Flag_Stop == 1)
+	if(angle < -50 || angle > 50 || Flag_Stop == 1)
 	{
 		temp = 1;
 		AIN1 = 0;
@@ -315,7 +596,7 @@ void Get_Angle(void)
 	Read_DMP();                    // Read quaternion from DMP FIFO
 	MPU_ClearINT();                // release the latched MPU INT so PA12 makes a fresh falling edge -> keeps the EXTI ISR firing
 	Angle_Balance = Pitch;         // Forward/backward tilt
-	Gyro_Balance  = -gyro[0];      // hardware-confirmed damping axis; gyro[1] caused immediate fall
+	Gyro_Balance  = gyro[1];      // hardware-confirmed damping axis; gyro[1] caused immediate fall
 }
 
 void Control_CalibrationTick(void)
@@ -367,6 +648,20 @@ void Control_CalibrationTick(void)
 		Gyro_Zero      = sum_gyro / (float)nsamp;          /* remove in Balance() so a still bot stops driving */
 		Balance_Ready  = 1;
 	}
+}
+
+/**************************************************************************
+Function: Command a forward-speed target. The ISR ramps Move_Target toward
+          this each 10ms tick (MOVE_RAMP_STEP), so callers can step it freely
+          without lurching a front-heavy body. Positive = forward; 0 = hold.
+          Ignored while line-follow is active (the line-follower owns the
+          command then).
+Input   : speed - desired forward speed (encoder counts / 10ms, summed L+R)
+Output  : none
+**************************************************************************/
+void Set_Forward_Speed(int speed)
+{
+	Move_Target_Cmd = speed;
 }
 
 /**************************************************************************

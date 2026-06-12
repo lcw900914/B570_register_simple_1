@@ -2,66 +2,8 @@
 #include "ir_tracker.h"
 #include "control.h"
 
-/* Frame buffer owned by oled.c; we blank it and draw a big turn arrow into it. */
+/* Frame buffer owned by oled.c; blanked each refresh before drawing. */
 extern u8 OLED_GRAM[128][8];
-
-/* Fill a solid rectangle in the frame buffer (inclusive corners). */
-static void OLED_FillRect(u8 xa, u8 ya, u8 xb, u8 yb)
-{
-	u8 x, y;
-	for(x = xa; x <= xb; x++)
-		for(y = ya; y <= yb; y++)
-			OLED_DrawPoint(x, y, 1);
-}
-
-/**************************************************************************
-Function: Draw a big full-screen arrow (head + tail bar) in screen space.
-          dir: 0 = left (<-), 1 = right (->), 2 = up (^), 3 = down (v).
-          The caller must have cleared the frame buffer first.
-**************************************************************************/
-static void OLED_BigArrow(u8 dir)
-{
-	int i, half;
-
-	switch(dir)
-	{
-	case 1:                                       /* right -> */
-		OLED_FillRect(8, 24, 76, 39);             /* tail bar on the left */
-		for(i = 0; i <= 44; i++)
-		{
-			half = 30 * (44 - i) / 44;
-			OLED_FillRect((u8)(75 + i), (u8)(32 - half), (u8)(75 + i), (u8)(32 + half));  /* tip on the right */
-		}
-		break;
-
-	case 0:                                       /* left <- */
-		OLED_FillRect(51, 24, 119, 39);           /* tail bar on the right */
-		for(i = 0; i <= 44; i++)
-		{
-			half = 30 * (44 - i) / 44;
-			OLED_FillRect((u8)(52 - i), (u8)(32 - half), (u8)(52 - i), (u8)(32 + half));  /* tip on the left */
-		}
-		break;
-
-	case 2:                                       /* up ^ */
-		OLED_FillRect(56, 30, 71, 60);            /* vertical tail bar (lower) */
-		for(i = 6; i <= 34; i++)
-		{
-			half = 30 * (i - 6) / 28;
-			OLED_FillRect((u8)(64 - half), (u8)i, (u8)(64 + half), (u8)i);  /* tip at top */
-		}
-		break;
-
-	default:                                      /* down v */
-		OLED_FillRect(56, 4, 71, 34);             /* vertical tail bar (upper) */
-		for(i = 30; i <= 58; i++)
-		{
-			half = 30 * (58 - i) / 28;
-			OLED_FillRect((u8)(64 - half), (u8)i, (u8)(64 + half), (u8)i);  /* tip at bottom */
-		}
-		break;
-	}
-}
 
 static void OLED_ShowSignedFixed16(u8 x, u8 y, float value)
 {
@@ -129,6 +71,8 @@ void oled_show(void)
 		OLED_ShowString(96, 0, "I");
 		OLED_ShowNumber(108, 0, INT, 1, 12);
 		OLED_ShowSignedFixed16(30, 20, Angle_Balance);
+		OLED_ShowString(0, 38, "T");
+		OLED_ShowSignedFixed16(30, 38, Control_GetBalanceTarget());
 		if(Control_IsBalanceReady())
 		{
 			OLED_ShowString(42, 48, "READY");
@@ -144,38 +88,7 @@ void oled_show(void)
 		return;
 	}
 
-	/* While line-following, dedicate the whole screen to one big arrow:
-	   -> / <- when steering, ^ ("go straight") otherwise. Nothing else shown.
-	   err > 0 = line to the right (turn right); err < 0 = turn left; 0 = straight. */
-	if(Flag_LineFollow)
-	{
-		static u8 shown_dir = 2;   /* arrow currently on screen (default: straight) */
-		static u8 hold      = 0;   /* refresh cycles to wait before the next switch */
-		u8 l, m, r, want;
-
-		IR_Read(&l, &m, &r);                   /* live reading, 1 = sensor on the black line */
-		if      (m && !l && !r) want = 2;      /* centred           -> straight */
-		else if (r && !l)       want = 1;      /* line on the right -> turn right */
-		else if (l && !r)       want = 0;      /* line on the left  -> turn left  */
-		else                    want = 2;      /* lost / all-black / ambiguous -> straight (never stick) */
-
-		if(hold) hold--;                       /* run down the lock-out window */
-		if(want != shown_dir && hold == 0)     /* only switch once the >= 1 s lock expired */
-		{
-			shown_dir = want;
-			hold = 20;                         /* hold this arrow >= ~1 s (20 x 50 ms) */
-		}
-		/* Only take over the screen for an actual turn. Going straight falls
-		   through to the normal dashboard below.
-		   Panel is mounted rotated, so rotate the arrow 90 deg CCW:
-		   turn-right(->)->up, turn-left(<-)->down. */
-		if(shown_dir != 2)
-		{
-			OLED_BigArrow(shown_dir == 1 ? 3 : 2);
-			OLED_Refresh_Gram();
-			return;
-		}
-	}
+	/* (Big turn-direction arrow removed: the dashboard below always shows now.) */
 
 	/* Row 0: control mode + live IR sensor state (1 = sensor over the black line) */
 	if(Flag_LineFollow) OLED_ShowString(0, 0, "LINE");
