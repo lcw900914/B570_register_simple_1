@@ -72,8 +72,11 @@
 /* Forward speed target while ON the line and centred (going straight).
  * Kept LOW because the sensor lookahead is only ~2cm: the bot must be able to
  * stop within that distance the instant it detects a corner, or it overshoots
- * the vertex and loses the line. Slower = follows tighter corners. */
-#define LINE_BASE_SPEED 3
+ * the vertex and loses the line. Slower = follows tighter corners.
+ * 6 -> 8: the ramp is soft cardboard that SAGS (gets steeper) under the bot,
+ * so it needs entry momentum to punch through before the sag develops.
+ * If corners start overshooting, drop back to 6. */
+#define LINE_BASE_SPEED 8
 
 
 

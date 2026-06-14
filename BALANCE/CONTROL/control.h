@@ -12,7 +12,10 @@
  * The jig may hold the bot slightly off the true balance point, leaving an
  * asymmetric "dashes/falls forward but recovers backward" behaviour.
  * Tune by binary search: dashes/falls FORWARD -> make MORE NEGATIVE;
- * dashes/falls BACKWARD -> more positive. Steps ~0.5 deg. */
+ * dashes/falls BACKWARD -> more positive. Steps ~0.5 deg.
+ * (0.5 and 1.0 were tried against the backward creep with NO effect - the creep
+ * turned out to be slope-induced, not a setpoint error; fixed instead by raising
+ * the velocity-integral clamp in control.c so the bot has real sustained push.) */
 #define BALANCE_TRIM (0)
 
 /* Motor dead-zone compensation (PWM units, full scale = 7199).
@@ -47,8 +50,37 @@
 
 /* Speed-loop integral gain. Was hard-coded 0 to avoid the "winds up then
  * launches" fault. Re-enable with a SMALL value to hold cruising speed while
- * moving; set back to 0 if dash/launch behaviour returns. */
-#define VELOCITY_KI -0.8f
+ * moving; set back to 0 if dash/launch behaviour returns.
+ * -1.5: more push per unit of integral -> uphill force builds FASTER (at -0.8
+ * the climb push took several seconds to wind up; the bot stalled mid-ramp and
+ * only made it when entry momentum carried it). If flat ground shows slow
+ * forward-backward hunting or launch, back off to -1.2 / -1.0. */
+#define VELOCITY_KI -1.5f
+
+/* ===== Seesaw (蹺蹺板) tip-over handling ================================ */
+/* Absolute-angle tip detection (thresholds are raw Angle_Balance = the OLED Angle
+ * value, NOT relative to the balance setpoint). While line-following:
+ *   ARM  : Angle_Balance climbs ABOVE SEESAW_CLIMB_PITCH (steep forward lean while
+ *          driving up the slope) and holds it for SEESAW_CLIMB_CONFIRM cycles.
+ *   TRIP : once armed, Angle_Balance drops BELOW SEESAW_TIP_PITCH (pitched right
+ *          back to the downhill side) -> the board has tipped -> line-follow OFF,
+ *          dump the climb push, ride the new downhill in pure balance.
+ * A steady climb sits up near +SEESAW_CLIMB_PITCH and never reaches the deeply
+ * NEGATIVE trip angle, so it cannot false-fire mid-climb (the problem the
+ * relative-lean / gyro versions had). */
+#define SEESAW_CLIMB_PITCH   17.0f  /* deg of forward pitch (Angle_Balance) that arms the detector. Watch the OLED Angle while climbing - it must actually reach this, or lower it */
+#define SEESAW_CLIMB_CONFIRM 30     /* x10ms the steep climb pitch must persist (0.3s) - filters accel/bump transients */
+#define SEESAW_TIP_PITCH    (0.0f) /* deg: once armed, Angle_Balance dropping below this fires the full tip (switch to pure-balance descent). Set to 0 = switch the moment the body pitches back through level, catching the forward dive early. Lower (negative) to fire later; must stay BELOW SEESAW_BRAKE_PITCH so the anti-dive brake engages first */
+/* ---- Early anti-dive (acts BEFORE the full -15 trip) ----
+ * The full trip at SEESAW_TIP_PITCH is deliberately late - by the time the body
+ * has pitched all the way back to -15, the wheels have already slammed forward
+ * (that slam is what drives the angle so negative). So the moment an armed climb
+ * starts collapsing past SEESAW_BRAKE_PITCH we pre-empt the dive: dump the climb
+ * integral and clamp forward drive. */
+#define SEESAW_BRAKE_PITCH   3.0f   /* deg: once armed, Angle_Balance falling BELOW this starts the anti-dive (dump push + clamp forward). MUST sit below the upright setpoint (~7) so plain standing / a hump crest that settles upright does NOT engage it - only a real collapse that pitches the body back past upright does. Raise toward the setpoint to react earlier (risks engaging on a settle undershoot); lower (toward 0 / negative) for a later, safer catch */
+#define SEESAW_FWD_CLAMP     0      /* PWM: max FORWARD common drive allowed during the anti-dive window. 0 = no forward drive at all while the board tips (strongest anti-dive; it rides the board down). Raise (e.g. 800/1500) if it instead falls BACKWARD off the board and needs some forward authority to stand. Reverse drive is never clamped */
+#define SEESAW_DESCEND_SPEED 0     /* forward creep target while riding the tipped board down. 0 = DON'T push forward: gravity already rolls it down the slope, and the climb integral was just dumped, so adding forward speed only feeds the dive. Set slightly negative for a gentle down-slope brake, or small positive only if it actually parks on the board */
+#define SEESAW_DESCEND_CYCLES 300  /* x10ms of creep after the tip (3s, enough to roll off the board), then speed -> 0 and it balances on the spot */
 
 int  EXTI0_IRQHandler(void);
 int  Balance(float angle, float gyro);
