@@ -91,8 +91,13 @@ void oled_show(void)
 	/* (Big turn-direction arrow removed: the dashboard below always shows now.) */
 
 	/* Row 0: control mode + live IR sensor state (1 = sensor over the black line) */
-	if(Flag_LineFollow) OLED_ShowString(0, 0, "LINE");
-	else                OLED_ShowString(0, 0, "BAL ");
+	switch(Control_GetMode())
+	{
+		case 1:  OLED_ShowString(0, 0, "TRAK"); break;  // flat line-following
+		case 2:  OLED_ShowString(0, 0, "CLMB"); break;  // climbing the up-slope
+		case 3:  OLED_ShowString(0, 0, "DOWN"); break;  // riding the tipped board down
+		default: OLED_ShowString(0, 0, "BAL "); break;  // pure balance
+	}
 	{
 		u8 l, m, r;
 		IR_Read(&l, &m, &r);

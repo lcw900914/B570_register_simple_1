@@ -18,6 +18,9 @@ static u8 Balance_Ready = 1;
 static u32 Cal_WindowStartISR = 0;  // g_isr_count at the calibration window start; 200Hz ISR tick = real-time timing
 static float Gyro_Zero = 0.0f;  // stationary gyro offset captured during calibration; removed in Balance()
 static u8 Velocity_Reset_Req = 0;  // one-shot: Velocity() dumps its integral+filter. Set when the seesaw tips - the wound-up CLIMB push (up to Ki*clamp PWM) would otherwise launch the bot down the new downhill
+static u8 Seesaw_Armed = 0;        // 1 = a sustained steep forward climb was confirmed; latched until tip/disarm. Gates the climb slowdown so slowing never suppresses the (full-speed) arming
+static u8 Seesaw_Descending = 0;   // 1 = riding the tipped board down (post-tip descent window). Tells Velocity() to drop its position-hold integral so it doesn't drive the bot BACKWARD against the downhill roll
+static u8 Track_Mode = 0;          // 1 = FLAT line-following (not climbing/descending/balancing). Selects the line-follow setpoint (MIDDLE_ANGLE_TRACK) and speed gain (VELOCITY_KP_TRACK); 0 = slope/balance values
 volatile u32 g_isr_count = 0;   // diagnostic: counts EXTI ISR entries; stays 0 if the interrupt never fires
 
 /**************************************************************************
@@ -84,58 +87,71 @@ int EXTI0_IRQHandler(void)
 			static u16 climb_cnt   = 0;   // consecutive cycles the steep climb pitch has held (while not armed)
 			static u16 descend_cnt = 0;   // remaining creep cycles after the tip
 			static u16 settle_cnt  = 0;   // consecutive settled-upright cycles while armed -> self-disarm a false arm (e.g. a plain hump crest, not a seesaw)
-			static u8  armed       = 0;   // 1 = a sustained steep forward climb was seen; now waiting for the board to tip
+			static float climb_peak = 0;  // highest Angle_Balance seen since arming; the tip fires when the angle drops SEESAW_TIP_DROP below it
+			/* arm latch is the file-scope Seesaw_Armed (so the climb slowdown can read it) */
 
-			/* Absolute-angle tip detection (per user request, values read off the OLED Angle):
-			 *   ARM  : Angle_Balance climbs PAST SEESAW_CLIMB_PITCH (steep forward lean up the hill)
-			 *          and holds it for SEESAW_CLIMB_CONFIRM cycles.
-			 *   ANTI-DIVE: once armed, the instant the pitch COLLAPSES below SEESAW_BRAKE_PITCH
-			 *          (board tipping) we dump the climb push and clamp forward drive - early,
-			 *          before the wheels slam forward.
-			 *   TRIP : pitch reaches SEESAW_TIP_PITCH -> full switch to pure-balance descent.
-			 * Steady climbing sits near +SEESAW_CLIMB_PITCH; normal standing sits at the
-			 * setpoint (~7). BRAKE_PITCH is set BELOW the setpoint so neither false-fires, and
-			 * settle_cnt disarms if an armed climb just levels off instead of tipping. */
+			/* Tip detection by a SHARP DROP from the climb peak (raw Angle_Balance = OLED Angle):
+			 *   ARM  : Angle_Balance climbs PAST SEESAW_CLIMB_PITCH (~10; the climb peaks
+			 *          ~17-20) and holds it for SEESAW_CLIMB_CONFIRM cycles. climb_peak is
+			 *          then tracked as the high-water mark.
+			 *   TRIP : once armed, the pitch FALLS more than SEESAW_TIP_DROP below climb_peak
+			 *          (e.g. ~20 -> -5, the board flipping under it), OR rises past
+			 *          SEESAW_TIP_FWD_PITCH (backup, forward dive).
+			 *   ANTI-DIVE: once armed, if the pitch is below SEESAW_BRAKE_PITCH but the drop
+			 *          hasn't hit the threshold yet, dump the climb push and clamp forward
+			 *          drive early, before the wheels slam.
+			 * The drop is relative to the actual climb height, so it adapts to the slope;
+			 * normal climb wobble is far smaller than SEESAW_TIP_DROP so it can't false-trip,
+			 * and settle_cnt disarms if an armed climb just levels off instead of tipping. */
 			if(Flag_LineFollow && Flag_Stop == 0)
 			{
 				descend_cnt = 0;
-				if(!armed)                       // not armed: wait for a sustained steep forward climb
+				Seesaw_Descending = 0;
+				if(!Seesaw_Armed)                // not armed: wait for a sustained steep forward climb
 				{
-					if(Angle_Balance > SEESAW_CLIMB_PITCH) { if(++climb_cnt >= SEESAW_CLIMB_CONFIRM) { armed = 1; settle_cnt = 0; } }
+					if(Angle_Balance > SEESAW_CLIMB_PITCH) { if(++climb_cnt >= SEESAW_CLIMB_CONFIRM) { Seesaw_Armed = 1; settle_cnt = 0; climb_peak = Angle_Balance; } }
 					else                                     climb_cnt = 0;
 				}
-				else if(Angle_Balance < SEESAW_TIP_PITCH)   // armed + pitched right back to the downhill side: the board has fully TIPPED
+				else
 				{
-					Flag_LineFollow    = 0;                 // drop to pure balance (the else-branch below also clears all pivot state this same cycle)
-					Velocity_Reset_Req = 1;                 // dump the climb push NOW - on the new downhill it would launch the bot
-					Set_Forward_Speed(SEESAW_DESCEND_SPEED);
-					descend_cnt = SEESAW_DESCEND_CYCLES;
-					armed       = 0;
-					climb_cnt   = 0;
-				}
-				else if(Angle_Balance < SEESAW_BRAKE_PITCH) // armed + the steep climb pitch is COLLAPSING past upright (board tipping), but not yet the full -15: kill the launch energy EARLY, before the dive can build. Waiting for the full trip is too late - by then the wheels have already slammed forward (which is what drives the angle down to -15 in the first place)
-				{
-					Velocity_Reset_Req = 1;                 // dump the wound-up climb integral every cycle while collapsing -> no sustained forward push left to launch on
-					tip_brake = 1;                          // clamp the forward balance drive this cycle (see SEESAW_FWD_CLAMP at the motor mix) so it can't chase the backward lean by flinging the wheels forward
-					settle_cnt = 0;                         // it's moving down, not settled
-				}
-				else                                        // armed, pitch between BRAKE_PITCH and CLIMB_PITCH: either still climbing or leveling off without tipping
-				{
-					float d = Angle_Balance - Balance_Target;
-					if(d < 0) d = -d;
-					if(d < 2.0f) { if(++settle_cnt >= 100) { armed = 0; climb_cnt = 0; settle_cnt = 0; } }  // settled upright ~1s with no tip -> that was a false arm (hump, not seesaw), disarm
-					else settle_cnt = 0;
+					if(Angle_Balance > climb_peak) climb_peak = Angle_Balance;   // track the climb high-water mark
+
+					if((climb_peak - Angle_Balance > SEESAW_TIP_DROP && Angle_Balance < SEESAW_TIP_FALL_TO)  // TIPPED: a sharp DROP from the climb peak AND the angle actually fell to a tipped-low value (the AND rejects a flexing-board spike that inflates the peak then returns to a still-climbing angle)
+					   || Angle_Balance > SEESAW_TIP_FWD_PITCH)                                          // OR dove forward past the climb band
+					{
+						Flag_LineFollow    = 0;                 // drop to pure balance (the else-branch below also clears all pivot state this same cycle)
+						Velocity_Reset_Req = 1;                 // dump the climb push NOW - on the new downhill it would launch the bot
+						Set_Forward_Speed(SEESAW_DESCEND_SPEED);
+						descend_cnt = SEESAW_DESCEND_CYCLES;
+						Seesaw_Descending = 1;                  // ride-down window: Velocity() drops its position-hold integral so it won't reverse against the roll
+						Seesaw_Armed = 0;
+						climb_cnt   = 0;
+					}
+					else if(Angle_Balance < SEESAW_BRAKE_PITCH) // collapsing past upright but the drop hasn't hit the threshold yet: kill the launch energy EARLY (dump push + clamp forward) before the wheels slam
+					{
+						Velocity_Reset_Req = 1;                 // dump the wound-up climb integral every cycle while collapsing -> no sustained forward push left to launch on
+						tip_brake = 1;                          // clamp the forward balance drive this cycle (see SEESAW_FWD_CLAMP at the motor mix)
+						settle_cnt = 0;                         // it's moving down, not settled
+					}
+					else                                        // armed, no big drop yet: still climbing or leveling off without tipping
+					{
+						float d = Angle_Balance - Balance_Target;
+						if(d < 0) d = -d;
+						if(d < 2.0f) { if(++settle_cnt >= 100) { Seesaw_Armed = 0; climb_cnt = 0; settle_cnt = 0; } }  // settled upright ~1s with no tip -> that was a false arm (hump, not seesaw), disarm
+						else settle_cnt = 0;
+					}
 				}
 			}
 			else
 			{
-				armed      = 0;
+				Seesaw_Armed = 0;
 				climb_cnt  = 0;
 				settle_cnt = 0;
+				climb_peak = 0;
 				if(descend_cnt > 0)               // post-tip descent: creep forward, then stop
 				{
 					descend_cnt--;
-					if(descend_cnt == 0 || Flag_Stop) { Set_Forward_Speed(0); descend_cnt = 0; }
+					if(descend_cnt == 0 || Flag_Stop) { Set_Forward_Speed(0); descend_cnt = 0; Seesaw_Descending = 0; }
 				}
 			}
 		}
@@ -308,6 +324,16 @@ int EXTI0_IRQHandler(void)
 				if(brake < -EXIT_BRAKE_MAX) brake = -EXIT_BRAKE_MAX;
 				Move_Target_Cmd = brake;
 			}
+
+			/* Climb slowdown: ONLY after the detector has armed (a full-speed climb
+			 * already reached SEESAW_CLIMB_PITCH and latched). Slowing earlier - while
+			 * the pitch was still rising toward the arm angle - robbed the push so the
+			 * pitch never reached 17 and it never armed (never switched to balance).
+			 * Gating on the latch keeps arming at full speed, then slows the run-in to
+			 * the tip so there's less momentum/integral to fling the bot. Caps only a
+			 * FORWARD command above the cap; brakes and flat-ground speed untouched. */
+			if(Seesaw_Armed && Move_Target_Cmd > SEESAW_CLIMB_SPEED)
+				Move_Target_Cmd = SEESAW_CLIMB_SPEED;
 		}
 		else
 		{
@@ -353,6 +379,12 @@ int EXTI0_IRQHandler(void)
 		if(Forward_Lean >  FORWARD_LEAN_MAX) Forward_Lean =  FORWARD_LEAN_MAX;
 		if(Forward_Lean < -FORWARD_LEAN_MAX) Forward_Lean = -FORWARD_LEAN_MAX;
 
+		/* Dynamic mode select: FLAT line-following uses the line-follow setpoint & speed
+		 * gain; climbing (armed) / descending / pure balance use the slope/balance ones.
+		 * Set BEFORE Balance() and Velocity() so both loops use the matching values. */
+		Track_Mode = (Flag_LineFollow && !Seesaw_Armed && !Seesaw_Descending) ? 1 : 0;
+		Balance_Target = Track_Mode ? MIDDLE_ANGLE_TRACK : Middle_angle;
+
 		Balance_Pwm  = Balance(Angle_Balance, Gyro_Balance);     // Upright PD control (uses Forward_Lean)
 
 		Velocity_Pwm = Velocity(Encoder_Left, Encoder_Right);    // Speed P(I) control
@@ -366,29 +398,33 @@ int EXTI0_IRQHandler(void)
 		 * zeroed here back when the pivot was a ONE-wheel reverse, whose asymmetric
 		 * encoders made the loop surge forward.) */
 
-		/* Gentle speed brake only. Hard threshold rescue made the body fall
-		 * immediately on this hardware, so keep the balance loop continuous.
-		 */
-#ifdef DEBUG_BALANCE_ONLY
-		brake_target = 0;
-#else
+		/* Speed brake - ONLY while line-following (Flag_LineFollow). It brakes the
+		 * forward translation when the body leans, taming the line-follow forward surge
+		 * (the working 循跡 build relies on this; disabling it made the bot run away and
+		 * fall while tracking). It is gated OFF in pure balance so it can't fight the
+		 * balance catch at a standstill. Force lowered from x3/±250 to x2/±200 per the
+		 * "煞車力道小一點點" request - raise back toward x3/±250 if surge returns, lower
+		 * (x1/±120) if it feels grabby. Also OFF while CLIMBING (Seesaw_Armed): on a
+		 * slope the lean is large and sustained, which would otherwise brake the climb. */
+		if(Track_Mode)   // flat line-following only (= Flag_LineFollow & not climbing/descending)
 		{
 			static u8 brake_active = 0;   // hysteresis latch: brakes between the 1.4/0.7 deg thresholds
 			float angle_error;
 			int   encoder_sum;
 
-			angle_error = Angle_Balance - (Balance_Target + BALANCE_TRIM + Forward_Lean);  // deviation from the (lean-adjusted) setpoint, so moving lean doesn't false-trigger the brake
+			angle_error = Angle_Balance - (Balance_Target + BALANCE_TRIM + Forward_Lean);
 			if(angle_error < 0) angle_error = -angle_error;
 			encoder_sum = Encoder_Left + Encoder_Right;
 			if(angle_error > 1.4f)       brake_active = 1;
 			else if(angle_error < 0.7f)  brake_active = 0;
 
 			if(brake_active && myabs(encoder_sum) > 3)
-				brake_target = PWM_Limit(-encoder_sum * 3, 250, -250);
+				brake_target = PWM_Limit(-encoder_sum * 2, 200, -200);   // x2 gain, ±200 cap (original was x3/±250)
 			else
 				brake_target = 0;
 		}
-#endif
+		else
+			brake_target = 0;
 
 		brake_pwm = (brake_pwm * 7 + brake_target) / 8;
 		early_brake = brake_pwm;
@@ -521,9 +557,16 @@ Output  : Velocity control PWM value
 int Velocity(int encoder_left, int encoder_right)
 {
 #ifdef DEBUG_BALANCE_ONLY
-	float Velocity_Kp = 0,    Velocity_Ki = 0;             // DEBUG: speed loop truly OFF -> pure balance (isolation test). (Was -160/-0.8 by mistake, i.e. NOT off.)
+	float Velocity_Kp = -200,    Velocity_Ki = -0.4;             // DEBUG: speed loop truly OFF -> pure balance (isolation test). (Was -160/-0.8 by mistake, i.e. NOT off.)
 #else
-	float Velocity_Kp = -160, Velocity_Ki = VELOCITY_KI;   // speed damping; Ki off by default (see VELOCITY_KI) to avoid launch
+	/* Mode-dependent proportional gain: lighter while FLAT line-following
+	 * (VELOCITY_KP_TRACK, the proven 循跡 value), heavier on a slope / in balance
+	 * (VELOCITY_KP_BAL). Track_Mode is set each cycle in the ISR before this runs. */
+	float Velocity_Kp = Track_Mode ? VELOCITY_KP_TRACK : VELOCITY_KP_BAL;
+	/* Mode-dependent integral gain: GENTLE when standing (VELOCITY_KI) so the
+	 * standstill balance stays smooth (the value proven under DEBUG); STRONG when
+	 * driving/climbing (VELOCITY_KI_CLIMB) so there is real sustained uphill push. */
+	float Velocity_Ki = (Move_Target != 0) ? VELOCITY_KI_CLIMB : VELOCITY_KI;
 #endif
 	static float velocity, Encoder_Least, Encoder_bias;
 	static float Encoder_Integral;
@@ -543,17 +586,33 @@ int Velocity(int encoder_left, int encoder_right)
 	Encoder_bias   *= 0.8;
 	Encoder_bias   += Encoder_Least * 0.2;
 
-	/* Integrate filtered error (10ms period) */
+	/* Integrate filtered error (10ms period). Plain continuous integration - the
+	 * original, known-good behaviour. (Conditional/frozen-integration anti-windup
+	 * schemes were tried to soften a hard-push return but each introduced a worse
+	 * disturbance mode - a pumped oscillation, or losing the force that settles the
+	 * swing - so they were removed. The continuous integral provides a continuous
+	 * restoring force that helps the swing converge.) */
 	Encoder_Integral += Encoder_bias;
-	if(Encoder_Integral >  4000) Encoder_Integral =  4000;   // Anti-windup clamp. x Ki 0.8 this is the bot's only SUSTAINED push (max 3200 PWM). 1000 (800 PWM) was too weak to hold/climb a slope; 3000 still lacked uphill power. If flat-ground launch behaviour returns, back off in steps of 1000
+	if(Encoder_Integral >  4000) Encoder_Integral =  4000;   // clamp kept full so the flat-ground hold settles smoothly (a small clamp starved it -> drift/hunt)
 	if(Encoder_Integral < -4000) Encoder_Integral = -4000;
+
+	/* Riding the tipped board DOWN: hold the position-integral at 0. Otherwise it
+	 * winds up as the bot rolls down the slope and drives the wheels BACKWARD to
+	 * "pull its position back" - the unwanted reverse during descent. Encoder_bias
+	 * (the speed-damping P term) is kept, so the roll-down stays gentle. This only
+	 * applies in the descent window; normal balance/position-hold is untouched. */
+	if(Seesaw_Descending) Encoder_Integral = 0;
 
 	velocity = -Encoder_bias * Velocity_Kp - Encoder_Integral * Velocity_Ki;
 
-	/* Reset integrator when motors are disabled/stopped, OR while line-following
-	 * with no forward command (turn/settle/lost). Otherwise the integral winds up
-	 * negative from the prior forward motion when Move_Target drops to 0, then
-	 * drives the bot BACKWARD to "pull its position back" - the unwanted reversing. */
+	/* Reset integrator when motors are disabled/stopped, OR while line-following with
+	 * no forward command (turn/settle/lost). In PURE BALANCE the integral is left to
+	 * accumulate (full clamp) for a smooth, drift-free flat-ground position hold - this
+	 * is the original, known-good behaviour. (Attempts to also clear/cap it here to
+	 * pre-empt a slope dash instead broke flat balance: clearing bias killed the speed
+	 * damping -> "往傾斜的地方衝"; clearing the integral killed the hold -> "往後退"; a
+	 * small cap starved the hold -> front/back hunting "前後飄". The slope-dash is
+	 * handled where it actually occurs - the seesaw tip sets Velocity_Reset_Req.) */
 	if(Turn_Off(Angle_Balance) == 1 || Flag_Stop == 1 || (Flag_LineFollow && Move_Target == 0))
 	{
 		Encoder_Integral = 0;
@@ -767,6 +826,19 @@ int myabs(int a)
 float Control_GetBalanceTarget(void)
 {
 	return Balance_Target;
+}
+
+/* Current operating mode (for the OLED display).
+ * 0 = BAL   : pure balance (line-follow off)
+ * 1 = TRACK : flat line-following (using the line-follow setpoint/gains)
+ * 2 = CLIMB : up-slope confirmed (armed) - using the balance/slope setpoint/gains
+ * 3 = DOWN  : riding the tipped board down (post-tip descent) */
+u8 Control_GetMode(void)
+{
+	if(Seesaw_Descending) return 3;   // DOWN
+	if(Seesaw_Armed)      return 2;   // CLIMB
+	if(Flag_LineFollow)   return 1;   // TRACK
+	return 0;                          // BAL
 }
 
 u8 Control_IsBalanceReady(void)

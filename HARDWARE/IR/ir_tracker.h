@@ -76,7 +76,7 @@
  * 6 -> 8: the ramp is soft cardboard that SAGS (gets steeper) under the bot,
  * so it needs entry momentum to punch through before the sag develops.
  * If corners start overshooting, drop back to 6. */
-#define LINE_BASE_SPEED 8
+#define LINE_BASE_SPEED 5
 
 
 
