@@ -54,14 +54,48 @@
  *   - spins past the line / left-right oscillation -> lower BOTH
  *   - want it to keep advancing through the corner -> raise PIVOT_OUTER only
  * Each must beat ~MOTOR_DEADZONE + balance PWM for that wheel to actually drive. */
-#define PIVOT_OUTER 300   /* OUTSIDE wheel: driven at common_pwm + this. Lowered to 800 for a SLOW in-place turn so a big corner doesn't get overshot/thrown off the track. Raise both if it stalls/turns too slowly */
-#define PIVOT_INNER 300   /* INSIDE (line-side) wheel: FIXED -PIVOT_INNER (absolute reverse). EQUAL to PIVOT_OUTER -> pure in-place spin (slow): one wheel +800, the other -800, no net forward/backward creep. If it OVERSHOOTS the corner, raise PIVOT_INNER a little above PIVOT_OUTER; too slow -> raise BOTH together */
+#define PIVOT_OUTER 850   /* OUTSIDE wheel: driven at common_pwm + this. Lowered to 800 for a SLOW in-place turn so a big corner doesn't get overshot/thrown off the track. Raise both if it stalls/turns too slowly */
+#define PIVOT_INNER 850   /* INSIDE (line-side) wheel: FIXED -PIVOT_INNER (absolute reverse). EQUAL to PIVOT_OUTER -> pure in-place spin (slow): one wheel +800, the other -800, no net forward/backward creep. If it OVERSHOOTS the corner, raise PIVOT_INNER a little above PIVOT_OUTER; too slow -> raise BOTH together */
 
 /* How many control cycles (10ms each) one corner-pivot chunk lasts before it
  * re-checks the sensors. Small -> stops close to centre (little overshoot) but
  * re-evaluates often; the +-2 corner handler re-arms it every cycle the line is
  * still off-centre, so the pivot continues until the line re-centres. */
 #define CORNER_PIVOT_CHUNK 3
+
+/* After a big-turn pivot finishes, drive STRAIGHT FORWARD for a short window
+ * (no steering, no pivot) so the bot settles onto the new line instead of
+ * immediately re-reacting and ping-ponging. CYCLES are 10ms ticks (30 = ~0.3s);
+ * SPEED is the forward target (same units as LINE_BASE_SPEED). One per corner
+ * (gated by the lock). Set CYCLES 0 to disable. */
+#define POST_PIVOT_STRAIGHT_CYCLES 30   /* straight-forward window after a turn */
+#define POST_PIVOT_STRAIGHT_SPEED  3    /* forward speed during the straight commit */
+
+/* Minimum turn length (cycles, 10ms each) before a backup is allowed: the bot
+ * must have been TURNING (off-centre / pivoting) continuously for at least this
+ * many cycles when it returns to centre, or no backup fires. Filters out small
+ * +-1 wobbles and brief corrections so ONLY a real corner backs up - this is
+ * what stops the pivot<->backup ping-pong. Bigger = only sharper/longer turns
+ * back up; smaller = even gentle bends back up. */
+#define POST_PIVOT_MIN_TURN 15
+
+/* Backup re-arm: after one backup fires it LOCKS, and only unlocks once the bot
+ * has run cleanly centred (010, not pivoting) for this many consecutive cycles -
+ * i.e. it has genuinely left the corner. Keep it long enough that the brief
+ * centre-touches during a tight-corner struggle never add up to it, so each
+ * corner backs up at most once. Bigger = stricter (must settle longer). */
+#define POST_PIVOT_REARM 30
+
+/* Brake-before-pivot (stop AT the corner instead of charging past it):
+ *   CORNER_BRAKE_STOP  : encoder-sum (L+R per 10ms) below which the bot counts as
+ *                        "stopped enough" to start the in-place pivot. Bigger =
+ *                        pivots while still creeping (less braking); smaller =
+ *                        insists on a fuller stop first (more anti-overshoot).
+ *   CORNER_BRAKE_SPEED : reverse target commanded while braking, to actively kill
+ *                        forward momentum (same units as LINE_BASE_SPEED). Bigger
+ *                        = harder/faster stop (may ease backward a touch). */
+#define CORNER_BRAKE_STOP  2
+#define CORNER_BRAKE_SPEED 4
 
 /* Per-direction pivot strength trim (%), to even out a LEFT/RIGHT motor strength
  * mismatch. During a pivot only one motor does the forward work, so any
@@ -82,7 +116,7 @@
  * 6 -> 8: the ramp is soft cardboard that SAGS (gets steeper) under the bot,
  * so it needs entry momentum to punch through before the sag develops.
  * If corners start overshooting, drop back to 6. */
-#define LINE_BASE_SPEED 1
+#define LINE_BASE_SPEED 2
 
 
 

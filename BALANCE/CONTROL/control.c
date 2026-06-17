@@ -55,6 +55,11 @@ int EXTI0_IRQHandler(void)
 	static u8 pivot_seen_lost = 0;      // pivot can finish only after seeing 000, then 010
 	static int pivot_dir = 0;           // latched hard-turn direction
 	static int last_pivot_dir = 0;      // direction of the most recent committed pivot; used as the search hint when the line vanishes straight to 000 (no last side known)
+	static int post_pivot_straight = 0;   // cycles left in the "drive straight forward after a big turn" phase (0 = inactive)
+	static int turn_run = 0;            // cycles spent TURNING (off-centre / pivoting) this episode; a backup needs this >= POST_PIVOT_MIN_TURN (a real turn, not a wobble)
+	static u8  backup_lock = 0;         // 1 = backup disabled until the bot clearly leaves the corner; set after one backup, cleared by a sustained clean straight
+	static int straight_run = 0;        // consecutive CLEAN centred (010, no pivot) cycles; unlocks backup_lock after POST_PIVOT_REARM of them
+	static u8  corner_braking = 0;      // 1 = killing forward momentum before a pivot (stop AT the corner, don't charge past it)
 	static u8 lost_from_pivot = 0;      // 1 = the 000 began while a pivot was rotating (between old/new line - keep rotating); 0 = blew straight past the corner (line is BEHIND the axle - must BACK UP, no rotation can reach it)
 	static u8 reached_center = 0;       // 1 = have hit centre at least once since the turn started -> later +-1 drifts are gentle fine-align, not a fresh hard turn
 
@@ -327,6 +332,57 @@ int EXTI0_IRQHandler(void)
 				}
 			}
 
+			/* Brake-before-pivot (corner stop): if a pivot is wanted but the bot is still
+			 * rolling FORWARD (encoder sum above CORNER_BRAKE_STOP), HOLD the spin and
+			 * brake first - so it stops AT the corner instead of charging past the vertex
+			 * and out of the track. Releases into the pivot once nearly stopped. */
+			if(post_pivot_straight == 0 && in_pivot &&
+			   (Encoder_Left + Encoder_Right) > CORNER_BRAKE_STOP)
+			{
+				in_pivot   = 0;          // don't rotate until forward momentum is killed
+				correction = 0;
+				corner_braking = 1;
+			}
+			else
+				corner_braking = 0;
+
+			/* One STRAIGHT-commit per corner. Accumulate turning time (off-centre /
+			 * pivoting). When the bot returns to centre after a REAL turn (turn_run >=
+			 * MIN) AND not locked, start a short straight-forward commit and LOCK it.
+			 * The lock clears only after the bot runs cleanly centred & straight for
+			 * POST_PIVOT_REARM cycles (it has left the corner). During a tight/
+			 * consecutive-corner struggle it never gets that sustained straight, so it
+			 * stays locked and can't keep re-triggering. */
+			if(post_pivot_straight == 0)
+			{
+				if(in_pivot || ir_error != 0)        // turning (off the straight)
+				{
+					turn_run++;
+					straight_run = 0;                // not on a clean straight
+				}
+				else                                 // centred (010), not pivoting
+				{
+					if(turn_run >= POST_PIVOT_MIN_TURN && !backup_lock)
+					{
+						post_pivot_straight = POST_PIVOT_STRAIGHT_CYCLES;   // real turn done -> drive straight a moment
+						backup_lock = 1;             // ...and don't re-trigger until clearly recovered
+					}
+					turn_run = 0;
+					if(++straight_run >= POST_PIVOT_REARM)
+						backup_lock = 0;             // sustained clean straight -> arm next corner
+				}
+			}
+			if(post_pivot_straight > 0)
+			{
+				correction      = 0;                          // go straight, no steering
+				in_pivot        = 0;                          // no pivot during the straight commit
+				pivot_dir       = 0;
+				pivot_min_count = 0;
+				pivot_seen_lost = 0;
+				/* Move_Target_Cmd is forced FORWARD at the END of this block (after
+				 * the was_hard exit-brake, which would otherwise overwrite it to 0). */
+			}
+
 			Move_Target_Cmd = base_speed;            // line-follower drives the forward command
 
 			/* Active exit-brake: while still settling after a hard turn (was_hard),
@@ -353,6 +409,22 @@ int EXTI0_IRQHandler(void)
 			 * FORWARD command above the cap; brakes and flat-ground speed untouched. */
 			if(Seesaw_Armed && Move_Target_Cmd > SEESAW_CLIMB_SPEED)
 				Move_Target_Cmd = SEESAW_CLIMB_SPEED;
+
+			/* Post-pivot STRAIGHT commit has the FINAL say on the forward command:
+			 * after a turn, drive straight FORWARD for a short window (no steering, no
+			 * pivot) so the bot settles onto the new line instead of immediately
+			 * re-reacting. Applied here, after the exit-brake/clamp would zero it. */
+			if(post_pivot_straight > 0)
+			{
+				Move_Target_Cmd = POST_PIVOT_STRAIGHT_SPEED;   // forward (no longer reverse)
+				post_pivot_straight--;
+			}
+
+			/* Corner brake has the final say too: while killing forward momentum before
+			 * a pivot, command an active reverse so the bot actually stops at the corner
+			 * (overrides the forward base speed / exit-brake). */
+			if(corner_braking)
+				Move_Target_Cmd = -CORNER_BRAKE_SPEED;
 		}
 		else
 		{
