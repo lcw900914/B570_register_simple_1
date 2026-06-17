@@ -54,8 +54,14 @@
  *   - spins past the line / left-right oscillation -> lower BOTH
  *   - want it to keep advancing through the corner -> raise PIVOT_OUTER only
  * Each must beat ~MOTOR_DEADZONE + balance PWM for that wheel to actually drive. */
-#define PIVOT_OUTER 2000   /* OUTSIDE wheel: driven at common_pwm + this (forward push, still carries the balance term) */
-#define PIVOT_INNER 2000   /* INSIDE (line-side) wheel: driven at a FIXED -PIVOT_INNER (absolute reverse). EQUAL to PIVOT_OUTER -> pure in-place spin (一前一後速度相同): one wheel +2000, the other -2000, no net forward/backward creep. The bot rotates on the spot, then resumes slow forward once re-centred. If it now OVERSHOOTS the corner (no longer pulled back), raise PIVOT_INNER a little above PIVOT_OUTER; if it turns too slowly, raise BOTH together */
+#define PIVOT_OUTER 300   /* OUTSIDE wheel: driven at common_pwm + this. Lowered to 800 for a SLOW in-place turn so a big corner doesn't get overshot/thrown off the track. Raise both if it stalls/turns too slowly */
+#define PIVOT_INNER 300   /* INSIDE (line-side) wheel: FIXED -PIVOT_INNER (absolute reverse). EQUAL to PIVOT_OUTER -> pure in-place spin (slow): one wheel +800, the other -800, no net forward/backward creep. If it OVERSHOOTS the corner, raise PIVOT_INNER a little above PIVOT_OUTER; too slow -> raise BOTH together */
+
+/* How many control cycles (10ms each) one corner-pivot chunk lasts before it
+ * re-checks the sensors. Small -> stops close to centre (little overshoot) but
+ * re-evaluates often; the +-2 corner handler re-arms it every cycle the line is
+ * still off-centre, so the pivot continues until the line re-centres. */
+#define CORNER_PIVOT_CHUNK 3
 
 /* Per-direction pivot strength trim (%), to even out a LEFT/RIGHT motor strength
  * mismatch. During a pivot only one motor does the forward work, so any
@@ -76,7 +82,7 @@
  * 6 -> 8: the ramp is soft cardboard that SAGS (gets steeper) under the bot,
  * so it needs entry momentum to punch through before the sag develops.
  * If corners start overshooting, drop back to 6. */
-#define LINE_BASE_SPEED 5
+#define LINE_BASE_SPEED 1
 
 
 
@@ -112,7 +118,7 @@
  * gently steering, so small curves FLOW instead of dead-stopping and being
  * over-turned. (+-2 stops forward and steers hard in place; a real corner then
  * reads 000 and the big pivot takes over.) */
-#define LINE_DRIFT_SPEED 2
+#define LINE_DRIFT_SPEED 1
 
 
 /* Number of consecutive centred (010) cycles required before speeding up to

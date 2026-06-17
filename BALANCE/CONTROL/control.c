@@ -270,18 +270,24 @@ int EXTI0_IRQHandler(void)
 				lost_count = 0;
 				straight_corr = 0;
 			}
-			else if(ir_error != 0)                   // 110/011: fresh in-place turn (strong), or post-turn fine-align (gentle)
+			else if(ir_error != 0)                   // 011/001/110/100: ANY off-centre -> SLOW in-place pivot toward the line
 			{
-				if(was_hard && reached_center && myabs(ir_error) < 2)  // gentle fine-align for slight +-1 drifts ONLY
-					correction = (ir_error > 0 ? 1 : -1) * IR_FINE_KP;
-				/* else: keep the strong IR_GetCorrection() from above. +-2 is NEVER
-				 * fine-align - it's the line fully off the middle. */
-				base_speed = (myabs(ir_error) >= 2) ? 0 : LINE_DRIFT_SPEED;  // +-2: STOP and steer hard in place - a real corner goes 000 within a few cycles and the 000 pivot takes over; +-1: keep creeping
-				center_count = 0;
-				was_lost = 0;
-				was_hard = 1;                        // a turn happened -> settle (brake + upright gate) when we re-centre
-				lost_count = 0;
-				straight_corr = (ir_error > 0) ? STRAIGHT_TRIM : -STRAIGHT_TRIM;  // seed the fading residual toward this side
+				/* Big turn: rotate on the spot (PIVOT_OUTER/INNER) toward the line side,
+				 * no forward creep, so a corner doesn't get overshot and thrown off the
+				 * track. ALL off-centre patterns pivot now - incl. 011/110 (two sensors
+				 * black, +-1) as well as the single-side 001/100 (+-2). Re-armed each
+				 * cycle the line is off-centre; ends ~CORNER_PIVOT_CHUNK cycles after it
+				 * re-centres (010). */
+				in_pivot        = 1;
+				pivot_dir       = (ir_error > 0) ? 1 : -1;
+				pivot_seen_lost = 1;                 // committed: exit at the next centred 010
+				pivot_min_count = CORNER_PIVOT_CHUNK;// short chunk -> small overshoot past centre
+				base_speed      = 0;                 // rotate on the spot, no forward drive
+				center_count    = 0;
+				was_lost        = 0;
+				was_hard        = 1;
+				lost_count      = 0;
+				straight_corr   = 0;
 			}
 			else                                     // centred (010)
 			{
