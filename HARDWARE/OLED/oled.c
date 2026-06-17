@@ -192,28 +192,18 @@ void OLED_ShowString(u8 x, u8 y, const u8 *p)
 }
 
 /**************************************************************************
-Function: Initialize the SSD1306 OLED controller
-Input   : none
-Output  : none
+Function: Re-send the SSD1306 configuration command sequence (no hardware
+          reset, no 100ms delay, no frame clear). Cheap (~25 command bytes)
+          so it can be called periodically from the main loop to RESYNC a
+          controller whose config registers were corrupted by motor/EMI noise
+          on the bit-banged SPI lines - the cause of the "OLED frozen / garbled
+          while the board keeps running" failure. The per-frame refresh already
+          re-asserts addressing + display-on, but the addressing MODE, segment
+          remap, multiplex, contrast etc. are only set here, so without this
+          periodic re-send a glitch in them stays until power-cycle.
 **************************************************************************/
-void OLED_Init(void)
+void OLED_Config(void)
 {
-	/* Configure GPIOB: PB3(RST), PB4(SDA), PB5(SCL) as push-pull output */
-	RCC->APB2ENR |= 1<<3;
-	GPIOB->CRL &= 0XFF000FFF;
-	GPIOB->CRL |= 0X00222000;
-
-	/* Configure GPIOA: PA15(DC) as push-pull output */
-	RCC->APB2ENR |= 1<<2;
-	GPIOA->CRH &= 0X0FFFFFFF;
-	GPIOA->CRH |= 0X20000000;
-
-	/* Hardware reset */
-	OLED_RST_Clr();
-	delay_ms(100);
-	OLED_RST_Set();
-
-	/* SSD1306 initialization sequence */
 	OLED_WR_Byte(0xAE, OLED_CMD);  // Display OFF
 	OLED_WR_Byte(0xD5, OLED_CMD);  // Set display clock divide ratio/oscillator frequency
 	OLED_WR_Byte(80,   OLED_CMD);  // [3:0]=divide ratio; [7:4]=oscillator freq
@@ -243,5 +233,30 @@ void OLED_Init(void)
 	OLED_WR_Byte(0xA4, OLED_CMD);  // Entire display ON: output follows RAM content
 	OLED_WR_Byte(0xA6, OLED_CMD);  // Normal display (not inverted)
 	OLED_WR_Byte(0xAF, OLED_CMD);  // Display ON
+}
+
+/**************************************************************************
+Function: Initialize the SSD1306 OLED controller
+Input   : none
+Output  : none
+**************************************************************************/
+void OLED_Init(void)
+{
+	/* Configure GPIOB: PB3(RST), PB4(SDA), PB5(SCL) as push-pull output */
+	RCC->APB2ENR |= 1<<3;
+	GPIOB->CRL &= 0XFF000FFF;
+	GPIOB->CRL |= 0X00222000;
+
+	/* Configure GPIOA: PA15(DC) as push-pull output */
+	RCC->APB2ENR |= 1<<2;
+	GPIOA->CRH &= 0X0FFFFFFF;
+	GPIOA->CRH |= 0X20000000;
+
+	/* Hardware reset */
+	OLED_RST_Clr();
+	delay_ms(100);
+	OLED_RST_Set();
+
+	OLED_Config();   // SSD1306 initialization command sequence
 	OLED_Clear();
 }

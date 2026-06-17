@@ -22,6 +22,10 @@ static u8 Seesaw_Armed = 0;        // 1 = a sustained steep forward climb was co
 static u8 Seesaw_Descending = 0;   // 1 = riding the tipped board down (post-tip descent window). Tells Velocity() to drop its position-hold integral so it doesn't drive the bot BACKWARD against the downhill roll
 static u8 Track_Mode = 0;          // 1 = FLAT line-following (not climbing/descending/balancing). Selects the line-follow setpoint (MIDDLE_ANGLE_TRACK) and speed gain (VELOCITY_KP_TRACK); 0 = slope/balance values
 volatile u32 g_isr_count = 0;   // diagnostic: counts EXTI ISR entries; stays 0 if the interrupt never fires
+volatile int g_pwm_left  = 0;   // diagnostic: last SIGNED motor command sent to Set_Pwm (left);  +=forward, -=reverse
+volatile int g_pwm_right = 0;   // diagnostic: last SIGNED motor command sent to Set_Pwm (right)
+volatile int g_balance_pwm  = 0;  // diagnostic: balance (upright PD) term this cycle
+volatile int g_velocity_pwm = 0;  // diagnostic: velocity (speed PI) term this cycle -> if THIS rails at +-6900 the speed loop is the runaway
 
 /**************************************************************************
 Function: Main control interrupt handler (triggered by MPU6050 INT pin,
@@ -56,10 +60,19 @@ int EXTI0_IRQHandler(void)
 
 	g_isr_count++;                       // diagnostic: every ISR entry, BEFORE the INT==0 guard
 
+	/* ALWAYS acknowledge the EXTI pending bit FIRST, even if INT has already gone
+	 * back high (the MPU INT is any-read-clear, so a fast release or a glitch can
+	 * leave the pin high by the time we run). The old code cleared PR only INSIDE
+	 * the INT==0 branch: an edge that had already released left PR latched, so the
+	 * ISR immediately re-fired forever (interrupt storm). The CPU was pinned in
+	 * this handler, the main loop and OLED froze, and the motors kept driving on
+	 * their LAST PWM with no fresh angle - the "當機就亂衝、沒在看角度" failure.
+	 * Clearing unconditionally costs at most one skipped sample; the next real
+	 * falling edge starts a clean cycle. */
+	EXTI->PR = 1<<0;                     // Clear external interrupt pending flag (EXTI line 0 = PA0)
+
 	if(INT == 0)
 	{
-		EXTI->PR = 1<<0;                 // Clear external interrupt pending flag (EXTI line 0 = PA0)
-
 		Flag_Target = !Flag_Target;
 		Get_Angle();                     // Read IMU and compute tilt angle
 		/* Encoder channels were SWAPPED in code vs the actual wiring (hand-spin test):
@@ -337,7 +350,10 @@ int EXTI0_IRQHandler(void)
 		}
 		else
 		{
-			correction = 0;
+			/* Descent steering trim (下坡往右 補償): while riding the tipped board
+			 * down (pure balance, both wheels equal PWM) a motor mismatch makes it
+			 * veer; inject a small fixed correction to cancel it. Off (0) otherwise. */
+			correction = Seesaw_Descending ? DESCENT_STEER_TRIM : 0;
 			/* Move_Target_Cmd is left as set by Set_Forward_Speed() (0 if never called) */
 
 			/* CRITICAL: clear ALL line-follow/pivot state. The motor mixing keys off
@@ -388,6 +404,9 @@ int EXTI0_IRQHandler(void)
 		Balance_Pwm  = Balance(Angle_Balance, Gyro_Balance);     // Upright PD control (uses Forward_Lean)
 
 		Velocity_Pwm = Velocity(Encoder_Left, Encoder_Right);    // Speed P(I) control
+
+		g_balance_pwm  = Balance_Pwm;   // diagnostic snapshots for the OLED breakdown
+		g_velocity_pwm = Velocity_Pwm;
 
 		/* NOTE: the speed loop is intentionally LEFT ACTIVE during the in-place pivot.
 		 * The pivot is a SYMMETRIC counter-rotation (one wheel +spin, the other
@@ -631,6 +650,9 @@ Output  : none
 void Set_Pwm(int motor_left, int motor_right)
 {
 	int pwm_left, pwm_right;
+
+	g_pwm_left  = motor_left;    // diagnostic snapshot (signed) for the OLED
+	g_pwm_right = motor_right;
 
 	/* Left motor (A): set direction, then magnitude + dead-zone offset */
 	if(motor_left > 0)      { AIN1 = 1; AIN2 = 0; pwm_left =  motor_left + MOTOR_DEADZONE; }

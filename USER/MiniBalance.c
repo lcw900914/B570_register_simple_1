@@ -65,8 +65,50 @@ int main(void)
 
     MPU_ClearINT();  // release the latched INT once so the first falling edge can fire the ISR (Get_Angle keeps clearing it thereafter)
 
+    /* Independent watchdog (IWDG): the entire balance loop lives in the EXTI ISR,
+     * and the motors hold their last PWM whenever that loop stops. If the CPU ever
+     * gets pinned (interrupt storm) or the main loop hangs (e.g. OLED SPI), the
+     * IWDG is no longer fed and the chip hardware-resets after ~1s. After reset
+     * Flag_Stop=1 (motors off at boot), so a frozen bot STOPS instead of driving
+     * on with a stale command. Fed once per main-loop pass below.
+     * LSI ~40kHz, /64 prescaler -> 625Hz tick; RLR=625 -> ~1.0s timeout. */
+    IWDG->KR  = 0x5555;   // enable write access to PR/RLR
+    IWDG->PR  = 4;        // prescaler = /64
+    IWDG->RLR = 625;      // ~1.0s timeout
+    IWDG->KR  = 0xAAAA;   // reload counter
+    IWDG->KR  = 0xCCCC;   // start the watchdog
+
     while(1)
     {
+        IWDG->KR = 0xAAAA;   // feed the watchdog (only here -> a frozen loop won't feed it -> reset)
+
+        /* Control-loop liveness failsafe: g_isr_count ticks on every EXTI ISR
+         * (200Hz). If it stops advancing while the main loop is still alive (the
+         * MPU stopped issuing INT, FIFO stall, etc.), the balance loop is DEAD but
+         * the motors are still energised at their last PWM -> the bot drives on
+         * with no angle update. Detect the stall and cut the motors hard. */
+        {
+            static u32 prev_isr = 0;
+            static u8  started = 0, stall = 0;
+            if(g_isr_count != prev_isr) { prev_isr = g_isr_count; stall = 0; started = 1; }
+            else if(started && ++stall >= 3)   // ~3 passes (>=150ms) with NO control ISR -> balance loop is dead
+            {
+                /* The EXTI ISR stopped firing - typically the MPU INT latched LOW after
+                 * a FIFO overflow, so no new falling edge is produced and the loop dies.
+                 * Recover it instead of giving up:
+                 *   1) cut the H-bridge so the motors can't keep driving on the last PWM
+                 *      (the "freeze then rush" failure), then
+                 *   2) re-clear the MPU INT to release the stuck line and revive the IRQ
+                 *      train so the bot comes back by itself.
+                 * Deliberately does NOT latch Flag_Stop: an earlier version forced it to 1
+                 * here, and because this runs EVERY pass while stalled it kept overriding
+                 * the key, so the bot got stuck OFF and could never be turned back ON. */
+                Set_Pwm(0, 0);                 // motors safe while the loop is dead
+                MPU_ClearINT();                // release a stuck/latched INT so the ISR can fire again
+                stall = 0;                     // give it a few passes to revive before retrying
+            }
+        }
+
         Key();   // button polled here: the EXTI ISR that used to host Key() is unreliable
 
         // Status on the OLED (no UART needed -> works while running on 12V).

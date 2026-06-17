@@ -32,7 +32,7 @@ void IR_Init(void)
 
 /**************************************************************************
 Function: Read the three IR sensors. Output is 1 when the sensor is over the
-          black line (active-low DO), 0 over the white floor.
+          black line (active-high DO: black = pin HIGH), 0 over the white floor.
 **************************************************************************/
 void IR_Read(u8 *l, u8 *m, u8 *r)
 {
@@ -51,7 +51,27 @@ int IR_GetError(void)
 	static u8 candl = 0, candm = 0, candr = 0, candn = 0; // candidate awaiting confirmation
 	u8 l, m, r;
 	int error;
+
+	/* Tilted back (Angle_Balance < IR_TRUST_MIN_ANGLE): the front-mounted IR no
+	   longer faces the floor squarely, so its reading is unreliable. Don't act on
+	   it - hold the last steering (same as a lost line) until the body comes back
+	   up. */
+	if(Angle_Balance < IR_TRUST_MIN_ANGLE)
+		return last_error;
+
 	IR_Read(&l, &m, &r);
+
+	/* Side-sensor false-black rejection (see SIDE_BLACK_CONFIRM): bias the L/R
+	 * channels toward WHITE. A side sensor must read black SIDE_BLACK_CONFIRM
+	 * times in a row before we believe it; any white read clears it at once. The
+	 * middle sensor is left raw so the line is tracked the instant it centres. */
+	{
+		static u8 lcnt = 0, rcnt = 0;
+		if(l) { if(lcnt < SIDE_BLACK_CONFIRM) lcnt++; } else lcnt = 0;
+		if(r) { if(rcnt < SIDE_BLACK_CONFIRM) rcnt++; } else rcnt = 0;
+		l = (lcnt >= SIDE_BLACK_CONFIRM) ? 1 : 0;
+		r = (rcnt >= SIDE_BLACK_CONFIRM) ? 1 : 0;
+	}
 
 	/* Debounce: a new sensor pattern must be read on TWO consecutive calls before
 	 * it is acted on. A single-cycle flicker (noise, reflection, a line edge or a

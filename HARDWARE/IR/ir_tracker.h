@@ -5,7 +5,7 @@
 /* ---- 3-channel IR line tracker (PD steering) ----
  * Sensors (digital DO):
  *   IR_L = PB1, IR_M = PA1, IR_R = PA2
- * Wiring: black line = LOW level (active low). Internal pull-ups enabled.
+ * Wiring: black line = HIGH level (active high, this board's DO output).
  * Logical reading: on black line = 1, on white floor = 0.
  */
 
@@ -54,8 +54,8 @@
  *   - spins past the line / left-right oscillation -> lower BOTH
  *   - want it to keep advancing through the corner -> raise PIVOT_OUTER only
  * Each must beat ~MOTOR_DEADZONE + balance PWM for that wheel to actually drive. */
-#define PIVOT_OUTER 1000   /* OUTSIDE wheel: driven at common_pwm + this (forward push, still carries the balance term) */
-#define PIVOT_INNER 3000   /* INSIDE (line-side) wheel: driven at a FIXED -PIVOT_INNER (absolute reverse) - strongly dominant. Net (OUTER-INNER)/2 = -1000: rotates fast on the reverse side while easing backward, pulling the overrun corner back under the sensors */
+#define PIVOT_OUTER 2000   /* OUTSIDE wheel: driven at common_pwm + this (forward push, still carries the balance term) */
+#define PIVOT_INNER 2000   /* INSIDE (line-side) wheel: driven at a FIXED -PIVOT_INNER (absolute reverse). EQUAL to PIVOT_OUTER -> pure in-place spin (一前一後速度相同): one wheel +2000, the other -2000, no net forward/backward creep. The bot rotates on the spot, then resumes slow forward once re-centred. If it now OVERSHOOTS the corner (no longer pulled back), raise PIVOT_INNER a little above PIVOT_OUTER; if it turns too slowly, raise BOTH together */
 
 /* Per-direction pivot strength trim (%), to even out a LEFT/RIGHT motor strength
  * mismatch. During a pivot only one motor does the forward work, so any
@@ -153,8 +153,13 @@
  * 0   = inner wheel gets no steering term (best for "inside wheel almost stops")
  * 50  = inner wheel gets half the normal reverse steering
  * 100 = same as normal symmetric steering
+ * SET TO 100 (原地轉): the inside wheel now reverses by the SAME amount the
+ * outside wheel drives forward, so a steering correction is a true in-place
+ * rotation (一前一後速度相同) instead of a wide forward arc. Slow forward creep
+ * still comes from LINE_DRIFT_SPEED / the post-turn resume. Lower back toward 50
+ * if slight (+-1) drifts make it weave/oscillate on the straight.
  */
-#define STEER_INNER_PERCENT 50
+#define STEER_INNER_PERCENT 100
 
 /* Outside-wheel steering strength when STEER_PIVOT_ONE_WHEEL is enabled.
  * 100 = outside wheel gets the normal correction
@@ -168,8 +173,44 @@
  */
 #define HARD_TURN_TANK_PIVOT
 
-/* GPIO level that means "black line detected". Flip to 1 if your sensors are active-high. */
+/* GPIO level that means "black line detected".
+ * These sensors are ACTIVE-LOW: over a BLACK line the DO pin reads 0 (low),
+ * over the WHITE floor it reads 1 (high). So IR_BLACK = 0 (matches the
+ * "可以平衡" build). Flip to 1 if you swap to active-high sensors. */
 #define IR_BLACK 0
+
+/* IR-trust gate: when Angle_Balance is below this (degrees), the bot is pitched
+ * back and the front IR doesn't face the floor squarely -> its reading is
+ * ignored (IR_GetError holds the last steering). 0.0 = distrust whenever the
+ * angle goes negative; lower it (e.g. -3) to tolerate a small backward lean
+ * before distrusting, raise toward 0/positive to distrust more eagerly. */
+#define IR_TRUST_MIN_ANGLE 0.0f
+
+/* ---- Side-sensor false-black rejection (側黑線門檻) ---------------------- *
+ * The L/R side sensors sometimes read BLACK over the white floor (reflection,
+ * floor texture, the digital threshold sitting right at the margin) -> a phantom
+ * 110/011 that jerks the steering. This is a SOFTWARE threshold on TOP of the
+ * sensor's own pot: a side sensor must report black for SIDE_BLACK_CONFIRM
+ * consecutive reads (~10ms each) before it is believed; a white read clears it
+ * instantly. So the side channels are biased toward white and a brief false
+ * black can't trigger a turn. The MIDDLE sensor is NOT filtered (the line must
+ * always be tracked the instant it reaches centre).
+ *   bigger  = more white-biased, ignores longer false-black blips (but a real
+ *             side line must persist longer before it steers)
+ *   1       = off (believe a side sensor immediately, original behaviour) */
+#define SIDE_BLACK_CONFIRM 3
+
+/* ---- Descent steering trim (下坡往右 補償) ------------------------------- *
+ * While riding the tipped board DOWN the bot is in pure balance, so both wheels
+ * get identical PWM and any left/right MOTOR strength mismatch shows up as a
+ * consistent veer (here: it drifts RIGHT). This injects a small fixed steering
+ * term during the descent window only, to cancel that drift.
+ *   NEGATIVE = steer LEFT  (use this to counter a rightward veer)
+ *   POSITIVE = steer RIGHT (use if it ever veers left)
+ *   0        = off (no trim)
+ * Tune in steps of ~100: make it more negative if it still pulls right, less if
+ * it now over-corrects to the left. Only active during descent (mode = DOWN). */
+#define DESCENT_STEER_TRIM (-300)
 
 /* Master switch: 0 = pure balance (IR ignored), 1 = line following. Default OFF. */
 extern u8 Flag_LineFollow;

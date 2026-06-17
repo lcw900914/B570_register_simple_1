@@ -63,14 +63,14 @@
  *                       If the climb still lacks force, make it MORE negative (-1.8/
  *                       -2.0) or raise the integral clamp in control.c. If flat
  *                       driving hunts/launches, back off toward -1.0. */
-#define VELOCITY_KI       -0.4f
+#define VELOCITY_KI       -0.2f
 #define VELOCITY_KI_CLIMB -1.5f
 
 /* Speed-loop proportional gain (damping) - applied MODE-DEPENDENTLY (see Track_Mode):
  *   VELOCITY_KP_TRACK : while FLAT line-following (the proven 循跡 value).
  *   VELOCITY_KP_BAL   : while balancing / on a slope / descending (more damping). */
 #define VELOCITY_KP_TRACK (-160)
-#define VELOCITY_KP_BAL   (-200)
+#define VELOCITY_KP_BAL   (-100)
 
 /* ===== Seesaw (蹺蹺板) tip-over handling ================================ */
 /* Tip detection by a SHARP PITCH DROP from the climb peak (Angle_Balance = OLED
@@ -131,5 +131,9 @@ u8   Control_GetMode(void);   // 0=BAL (pure balance) 1=TRACK (flat line-follow)
 void Control_CalibrationTick(void);
 
 extern volatile u32 g_isr_count;   // diagnostic: EXTI ISR entry counter (0 = never fires)
+extern volatile int g_pwm_left;    // diagnostic: last signed left motor PWM command
+extern volatile int g_pwm_right;   // diagnostic: last signed right motor PWM command
+extern volatile int g_balance_pwm;  // diagnostic: balance term this cycle
+extern volatile int g_velocity_pwm; // diagnostic: velocity term this cycle
 
 #endif

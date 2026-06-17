@@ -20,6 +20,7 @@
 
 /* OLED driver API */
 void OLED_WR_Byte(u8 dat, u8 cmd);
+void OLED_Config(void);          /* re-send SSD1306 config cmds (EMI-corruption resync) */
 void OLED_Display_On(void);
 void OLED_Display_Off(void);
 void OLED_Refresh_Gram(void);
