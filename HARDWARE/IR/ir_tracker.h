@@ -55,7 +55,7 @@
  *   - want it to keep advancing through the corner -> raise PIVOT_OUTER only
  * Each must beat ~MOTOR_DEADZONE + balance PWM for that wheel to actually drive. */
 #define PIVOT_OUTER 850   /* OUTSIDE wheel: driven at common_pwm + this. Lowered to 800 for a SLOW in-place turn so a big corner doesn't get overshot/thrown off the track. Raise both if it stalls/turns too slowly */
-#define PIVOT_INNER 850   /* INSIDE (line-side) wheel: FIXED -PIVOT_INNER (absolute reverse). EQUAL to PIVOT_OUTER -> pure in-place spin (slow): one wheel +800, the other -800, no net forward/backward creep. If it OVERSHOOTS the corner, raise PIVOT_INNER a little above PIVOT_OUTER; too slow -> raise BOTH together */
+#define PIVOT_INNER 1050   /* INSIDE (line-side) wheel: FIXED -PIVOT_INNER (absolute reverse). EQUAL to PIVOT_OUTER -> pure in-place spin (slow): one wheel +800, the other -800, no net forward/backward creep. If it OVERSHOOTS the corner, raise PIVOT_INNER a little above PIVOT_OUTER; too slow -> raise BOTH together */
 
 /* How many control cycles (10ms each) one corner-pivot chunk lasts before it
  * re-checks the sensors. Small -> stops close to centre (little overshoot) but
