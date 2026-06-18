@@ -59,7 +59,8 @@ int EXTI0_IRQHandler(void)
 	static int turn_run = 0;            // cycles spent TURNING (off-centre / pivoting) this episode; a backup needs this >= POST_PIVOT_MIN_TURN (a real turn, not a wobble)
 	static u8  backup_lock = 0;         // 1 = backup disabled until the bot clearly leaves the corner; set after one backup, cleared by a sustained clean straight
 	static int straight_run = 0;        // consecutive CLEAN centred (010, no pivot) cycles; unlocks backup_lock after POST_PIVOT_REARM of them
-	static u8  corner_braking = 0;      // 1 = killing forward momentum before a pivot (stop AT the corner, don't charge past it)
+	static u8  corner_braking = 0;      // 1 = braking/reversing before a pivot (stop AT the corner, then back up a little)
+	static int corner_back_cnt = 0;     // cycles of extra reverse left AFTER the forward stop, before the pivot starts
 	static u8 lost_from_pivot = 0;      // 1 = the 000 began while a pivot was rotating (between old/new line - keep rotating); 0 = blew straight past the corner (line is BEHIND the axle - must BACK UP, no rotation can reach it)
 	static u8 reached_center = 0;       // 1 = have hit centre at least once since the turn started -> later +-1 drifts are gentle fine-align, not a fresh hard turn
 
@@ -332,19 +333,32 @@ int EXTI0_IRQHandler(void)
 				}
 			}
 
-			/* Brake-before-pivot (corner stop): if a pivot is wanted but the bot is still
-			 * rolling FORWARD (encoder sum above CORNER_BRAKE_STOP), HOLD the spin and
-			 * brake first - so it stops AT the corner instead of charging past the vertex
-			 * and out of the track. Releases into the pivot once nearly stopped. */
-			if(post_pivot_straight == 0 && in_pivot &&
-			   (Encoder_Left + Encoder_Right) > CORNER_BRAKE_STOP)
+			/* Brake-then-reverse before a pivot: if a pivot is wanted, first STOP the
+			 * forward momentum (so it doesn't charge past the vertex), THEN reverse a
+			 * little (CORNER_BACKUP_CYCLES) to pull the corner back under the sensors,
+			 * and only then start the in-place pivot. */
+			if(post_pivot_straight == 0 && in_pivot)
 			{
-				in_pivot   = 0;          // don't rotate until forward momentum is killed
-				correction = 0;
-				corner_braking = 1;
+				if((Encoder_Left + Encoder_Right) > CORNER_BRAKE_STOP)  // still rolling forward -> brake
+				{
+					corner_braking  = 1;
+					corner_back_cnt = CORNER_BACKUP_CYCLES;   // arm the post-stop reverse
+				}
+				else if(corner_back_cnt > 0)                 // stopped -> reverse a little before turning
+				{
+					corner_braking = 1;
+					corner_back_cnt--;
+				}
+				else
+					corner_braking = 0;                      // braked + backed up -> let the pivot run
+
+				if(corner_braking) { in_pivot = 0; correction = 0; }  // hold the spin while braking/backing
 			}
 			else
-				corner_braking = 0;
+			{
+				corner_braking  = 0;
+				corner_back_cnt = 0;
+			}
 
 			/* One STRAIGHT-commit per corner. Accumulate turning time (off-centre /
 			 * pivoting). When the bot returns to centre after a REAL turn (turn_run >=

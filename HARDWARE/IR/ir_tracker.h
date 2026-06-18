@@ -55,7 +55,7 @@
  *   - want it to keep advancing through the corner -> raise PIVOT_OUTER only
  * Each must beat ~MOTOR_DEADZONE + balance PWM for that wheel to actually drive. */
 #define PIVOT_OUTER 850   /* OUTSIDE wheel: driven at common_pwm + this. Lowered to 800 for a SLOW in-place turn so a big corner doesn't get overshot/thrown off the track. Raise both if it stalls/turns too slowly */
-#define PIVOT_INNER 1050   /* INSIDE (line-side) wheel: FIXED -PIVOT_INNER (absolute reverse). EQUAL to PIVOT_OUTER -> pure in-place spin (slow): one wheel +800, the other -800, no net forward/backward creep. If it OVERSHOOTS the corner, raise PIVOT_INNER a little above PIVOT_OUTER; too slow -> raise BOTH together */
+#define PIVOT_INNER 1250   /* INSIDE (line-side) wheel: FIXED -PIVOT_INNER (absolute reverse). EQUAL to PIVOT_OUTER -> pure in-place spin (slow): one wheel +800, the other -800, no net forward/backward creep. If it OVERSHOOTS the corner, raise PIVOT_INNER a little above PIVOT_OUTER; too slow -> raise BOTH together */
 
 /* How many control cycles (10ms each) one corner-pivot chunk lasts before it
  * re-checks the sensors. Small -> stops close to centre (little overshoot) but
@@ -68,7 +68,7 @@
  * immediately re-reacting and ping-ponging. CYCLES are 10ms ticks (30 = ~0.3s);
  * SPEED is the forward target (same units as LINE_BASE_SPEED). One per corner
  * (gated by the lock). Set CYCLES 0 to disable. */
-#define POST_PIVOT_STRAIGHT_CYCLES 30   /* straight-forward window after a turn */
+#define POST_PIVOT_STRAIGHT_CYCLES 90   /* straight-forward window after a turn */
 #define POST_PIVOT_STRAIGHT_SPEED  3    /* forward speed during the straight commit */
 
 /* Minimum turn length (cycles, 10ms each) before a backup is allowed: the bot
@@ -96,6 +96,11 @@
  *                        = harder/faster stop (may ease backward a touch). */
 #define CORNER_BRAKE_STOP  2
 #define CORNER_BRAKE_SPEED 4
+
+/* After the forward stop, reverse for this many cycles (10ms each) before the
+ * pivot starts, to pull the corner back under the sensors. 0 = just stop, no
+ * extra reverse. Bigger = backs up more before turning. */
+#define CORNER_BACKUP_CYCLES 20
 
 /* Per-direction pivot strength trim (%), to even out a LEFT/RIGHT motor strength
  * mismatch. During a pivot only one motor does the forward work, so any
