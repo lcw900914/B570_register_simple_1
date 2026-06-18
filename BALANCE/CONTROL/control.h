@@ -9,8 +9,8 @@
  *                         so the bot does not run away forward while tracking (this is
  *                         the setpoint the working 循跡 build used).
  * The active value is selected each cycle in EXTI0_IRQHandler (see Track_Mode). */
-#define Middle_angle        9.0f
-#define MIDDLE_ANGLE_TRACK  9.0f   /* TEST: =Middle_angle, so the setpoint no longer switches (was 7.1). If the forward surge stops, the 7.1 line-follow setpoint was the cause and 9.0 is this bot's true balance point. */
+#define Middle_angle        8.3f
+#define MIDDLE_ANGLE_TRACK  8.3f   /* TEST: =Middle_angle, so the setpoint no longer switches (was 7.1). If the forward surge stops, the 7.1 line-follow setpoint was the cause and 9.0 is this bot's true balance point. */
 
 /* Fine trim (degrees) added on top of the runtime-calibrated Balance_Target.
  * The jig may hold the bot slightly off the true balance point, leaving an
@@ -28,7 +28,7 @@
  * every non-zero control output so the motor reacts to small tilts too.
  * Tune: raise if it still won't move at small angles; lower if it buzzes /
  * twitches / oscillates while standing near upright. Set to 0 to disable. */
-#define MOTOR_DEADZONE 350
+#define MOTOR_DEADZONE 450
 
 /* ===== Forward-motion tuning (balance WHILE moving) ===================== */
 
@@ -63,14 +63,14 @@
  *                       If the climb still lacks force, make it MORE negative (-1.8/
  *                       -2.0) or raise the integral clamp in control.c. If flat
  *                       driving hunts/launches, back off toward -1.0. */
-#define VELOCITY_KI       -0.2f
+#define VELOCITY_KI       -0.6f
 #define VELOCITY_KI_CLIMB -1.5f
 
 /* Speed-loop proportional gain (damping) - applied MODE-DEPENDENTLY (see Track_Mode):
  *   VELOCITY_KP_TRACK : while FLAT line-following (the proven 循跡 value).
  *   VELOCITY_KP_BAL   : while balancing / on a slope / descending (more damping). */
 #define VELOCITY_KP_TRACK (-160)
-#define VELOCITY_KP_BAL   (-100)
+#define VELOCITY_KP_BAL   (-150)
 
 /* ===== Seesaw (蹺蹺板) tip-over handling ================================ */
 /* Tip detection by a SHARP PITCH DROP from the climb peak (Angle_Balance = OLED
@@ -110,7 +110,7 @@
  * forward drive, even though the full drop threshold hasn't been reached yet. */
 #define SEESAW_BRAKE_PITCH   3.0f   /* deg: once armed, Angle_Balance falling BELOW this starts the anti-dive (dump push + clamp forward). MUST sit below the upright setpoint (~7) so plain standing / a hump crest that settles upright does NOT engage it - only a real collapse that pitches the body back past upright does. Raise toward the setpoint to react earlier (risks engaging on a settle undershoot); lower (toward 0 / negative) for a later, safer catch */
 #define SEESAW_FWD_CLAMP     0      /* PWM: max FORWARD common drive allowed during the anti-dive window. 0 = no forward drive at all while the board tips (strongest anti-dive; it rides the board down). Raise (e.g. 800/1500) if it instead falls BACKWARD off the board and needs some forward authority to stand. Reverse drive is never clamped */
-#define SEESAW_DESCEND_SPEED (-3)  /* speed target while riding the tipped board down. NEGATIVE = down-slope BRAKE: with the position-integral dumped during descent, nothing was opposing gravity so it accelerated downhill ("下降速度太快"); a slight reverse target biases the P term to brake the roll. 0 = no brake (free roll); more negative (-5/-6) = stronger brake (too much may stall/reverse on a gentle slope) */
+#define SEESAW_DESCEND_SPEED (-5)  /* (-3 -> -5: stronger down-brake for 30% + higher climb drive, so it doesn't dive/flip forward going down) speed target while riding the tipped board down. NEGATIVE = down-slope BRAKE: with the position-integral dumped during descent, nothing was opposing gravity so it accelerated downhill ("下降速度太快"); a slight reverse target biases the P term to brake the roll. 0 = no brake (free roll); more negative (-5/-6) = stronger brake (too much may stall/reverse on a gentle slope) */
 #define SEESAW_DESCEND_CYCLES 300  /* x10ms of creep after the tip (3s, enough to roll off the board), then speed -> 0 and it balances on the spot */
 
 int  EXTI0_IRQHandler(void);

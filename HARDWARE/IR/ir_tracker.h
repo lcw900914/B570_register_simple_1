@@ -54,8 +54,8 @@
  *   - spins past the line / left-right oscillation -> lower BOTH
  *   - want it to keep advancing through the corner -> raise PIVOT_OUTER only
  * Each must beat ~MOTOR_DEADZONE + balance PWM for that wheel to actually drive. */
-#define PIVOT_OUTER 2000   /* OUTSIDE wheel: driven at common_pwm + this (forward push, still carries the balance term) */
-#define PIVOT_INNER 2000   /* INSIDE (line-side) wheel: driven at a FIXED -PIVOT_INNER (absolute reverse). EQUAL to PIVOT_OUTER -> pure in-place spin (一前一後速度相同): one wheel +2000, the other -2000, no net forward/backward creep. The bot rotates on the spot, then resumes slow forward once re-centred. If it now OVERSHOOTS the corner (no longer pulled back), raise PIVOT_INNER a little above PIVOT_OUTER; if it turns too slowly, raise BOTH together */
+#define PIVOT_OUTER 550   /* OUTSIDE wheel: driven at common_pwm + this (forward push, still carries the balance term) */
+#define PIVOT_INNER 900   /* INSIDE (line-side) wheel: driven at a FIXED -PIVOT_INNER (absolute reverse). EQUAL to PIVOT_OUTER -> pure in-place spin (一前一後速度相同): one wheel +2000, the other -2000, no net forward/backward creep. The bot rotates on the spot, then resumes slow forward once re-centred. If it now OVERSHOOTS the corner (no longer pulled back), raise PIVOT_INNER a little above PIVOT_OUTER; if it turns too slowly, raise BOTH together */
 
 /* Per-direction pivot strength trim (%), to even out a LEFT/RIGHT motor strength
  * mismatch. During a pivot only one motor does the forward work, so any
@@ -76,7 +76,13 @@
  * 6 -> 8: the ramp is soft cardboard that SAGS (gets steeper) under the bot,
  * so it needs entry momentum to punch through before the sag develops.
  * If corners start overshooting, drop back to 6. */
-#define LINE_BASE_SPEED 5
+#define LINE_BASE_SPEED 1
+
+/* Sub-1 forward creep divider: a forward command is let through only 1 cycle in
+ * every LINE_SPEED_DIV, so the AVERAGE forward speed = LINE_BASE_SPEED /
+ * LINE_SPEED_DIV. 1 = full (no slowdown), 2 = half speed, 3 = third, ...
+ * (slightly pulsed at low control-rate, but the chassis inertia smooths it.) */
+#define LINE_SPEED_DIV 1
 
 
 
@@ -99,6 +105,30 @@
 #define LOST_ARC_CYCLES    2     /* ~20ms grace before recovery (was 6). Every grace cycle is coasting distance carried PAST the corner - the track has no line gaps to glide over, so commit to the pivot almost immediately */
 #define LOST_BACKUP_CYCLES 90    /* reverse from cycle 6 to ~90 (~0.84s) to bring the overrun corner back under the sensors */
 #define LINE_BACKUP_SPEED  3     /* reverse speed target while backing up (same units as LINE_BASE_SPEED) */
+
+/* Post-turn backup: after EVERY turn (pivot) finishes, reverse for this many
+ * cycles (10ms each) at POST_TURN_BACK_SPEED before resuming forward, so the bot
+ * re-seats on the line after a corner. 100 = ~1s. Set CYCLES 0 to disable. */
+#define POST_TURN_BACK_CYCLES 0    /* TEMP DISABLED: no post-turn backup (was 20). Set back to ~20-100 to re-enable. */
+#define POST_TURN_BACK_SPEED  1
+
+/* STEPPED big turn: instead of one continuous spin, a turn is done as a series of
+ * small pivot STEPS with a rebalance PAUSE between each, so the body recovers its
+ * balance between steps (a big turn = several small turns).
+ *   PIVOT_STEP_CYCLES  : length of one small pivot step (10ms each). Smaller =
+ *                        smaller turn per step = more steps, gentler on balance.
+ *   PIVOT_PAUSE_CYCLES : balance-on-the-spot pause between steps (10ms each).
+ *                        Bigger = more time to stabilise before the next step.
+ * (A ~90deg turn ends up as roughly turn_total / PIVOT_STEP_CYCLES steps.) */
+#define PIVOT_STEP_CYCLES   7
+#define PIVOT_PAUSE_CYCLES  20
+
+/* Over-rotation: once a pivot first reaches centre, spin this many MORE cycles
+ * (10ms each) before exiting, so the heading finishes the corner (~90deg) instead
+ * of stopping under-rotated (~75deg) and drifting off the line. Too big = it
+ * over-shoots the line to the other side and has to correct back (oscillation);
+ * too small = still exits under-rotated. */
+#define PIVOT_OVERROTATE 6
 #define LOST_GIVEUP_CYCLES 250   /* ~2.5s total before giving up */
 #define LOST_SEARCH_CHUNK  10    /* search rotates in ~100ms pivot chunks; finding the line mid-chunk overshoots at most the chunk remainder */
 

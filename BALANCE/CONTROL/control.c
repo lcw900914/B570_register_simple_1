@@ -55,8 +55,12 @@ int EXTI0_IRQHandler(void)
 	static u8 pivot_seen_lost = 0;      // pivot can finish only after seeing 000, then 010
 	static int pivot_dir = 0;           // latched hard-turn direction
 	static int last_pivot_dir = 0;      // direction of the most recent committed pivot; used as the search hint when the line vanishes straight to 000 (no last side known)
+	static int pivot_pause = 0;         // cycles left in the rebalance PAUSE between small pivot steps (stepped big-turn: small turn -> stabilise -> small turn ...)
+	static u8  overrot_done = 0;        // 1 = already added the over-rotation past centre for this pivot (one-shot, so the heading finishes ~90deg instead of exiting under-rotated)
 	static u8 lost_from_pivot = 0;      // 1 = the 000 began while a pivot was rotating (between old/new line - keep rotating); 0 = blew straight past the corner (line is BEHIND the axle - must BACK UP, no rotation can reach it)
 	static u8 reached_center = 0;       // 1 = have hit centre at least once since the turn started -> later +-1 drifts are gentle fine-align, not a fresh hard turn
+	static int post_turn_back = 0;      // cycles left in the "reverse ~1s after a turn" phase (0 = inactive)
+	static u8  did_hard_turn = 0;       // 1 = a real turn (pivot or +-2) happened; triggers the post-turn backup when the bot re-centres, then clears
 
 	g_isr_count++;                       // diagnostic: every ISR entry, BEFORE the INT==0 guard
 
@@ -177,6 +181,9 @@ int EXTI0_IRQHandler(void)
 			correction = IR_GetCorrection();         // PD steering term (reads the 3 sensors)
 			ir_error   = IR_GetLastError();          // error just computed (no re-read)
 
+			if(in_pivot || myabs(ir_error) >= 2)     // a REAL turn is happening (pivot, or line fully off to one side)
+				did_hard_turn = 1;                   // ...remembered so the post-turn backup fires when we re-centre
+
 			/* Pivot lifetime watchdog: a hard pivot ticks down EVERY cycle (not only
 			 * while centred). When the minimum has elapsed, release the latch so
 			 * normal handling resumes - it exits at the next 010, or re-enters a
@@ -190,8 +197,10 @@ int EXTI0_IRQHandler(void)
 					in_pivot = 0;
 					pivot_seen_lost = 0;
 					pivot_dir = 0;
+					pivot_pause = PIVOT_PAUSE_CYCLES;   // small turn done -> pause & rebalance before the next step
 				}
 			}
+			else if(pivot_pause > 0) pivot_pause--;     // counting down the between-steps rebalance pause
 
 			/* Corners are handled by the ALL-WHITE (000) path now: +-2 no longer
 			 * escalates to a pivot by itself. On this sensor bar (2cm lookahead) a
@@ -215,51 +224,22 @@ int EXTI0_IRQHandler(void)
 				if(lost_count < 1000) lost_count++;   // KEEP counting while lost-pivoting so a truly lost bot still reaches give-up (was reset to 0 here, which could search forever)
 				straight_corr = 0;
 			}
-			else if(IR_LineLost())                   // all-white (000): line lost -> escalating recovery (brief glide -> pivot-search -> stop)
+			else if(IR_LineLost())                   // all-white (000), NOT mid-pivot: line truly lost
 			{
-				int dir = (ir_error > 0) ? 1 : (ir_error < 0 ? -1 : 0);  // last seen side (held in last_error)
-				was_lost = 1;                        // a following 010 must wait out the re-acquire delay
-				was_hard = 0;                        // lost path owns the settle now (via was_lost)
-				center_count = 0;
-				straight_corr = 0;                   // no straight residual while lost
-				reached_center = 0;
-				if(lost_count < 1000) lost_count++;
-
-				if(lost_count < LOST_ARC_CYCLES)         // phase 1: brief grace (coast) - a scuff/tiny line gap glides through on momentum; do NOT drive forward, every cm of overrun puts the corner further behind the sensors
-				{
-					correction = dir * IR_LOST_CORRECTION;
-					base_speed = 0;
-					in_pivot = 0;
-					pivot_min_count = 0;
-					pivot_seen_lost = 0;
-					pivot_dir = 0;
-				}
-				else if(dir == 0 && !lost_from_pivot && lost_count < LOST_BACKUP_CYCLES)  // phase 2: blew STRAIGHT past the corner with NO side information (centred -> 000). The vertex is BEHIND the sensor bar and rotation can't reach it - REVERSE until the line comes back under the sensors. (With a known side, skip straight to the pivot: the line is just off to that side.)
-				{
-					correction = 0;
-					base_speed = -LINE_BACKUP_SPEED;
-					in_pivot = 0;
-					pivot_min_count = 0;
-					pivot_seen_lost = 0;
-					pivot_dir = 0;
-				}
-				else if((dir != 0 || last_pivot_dir != 0) && lost_count < LOST_GIVEUP_CYCLES) // phase 3: pivot-search toward the last-seen side (or the previous corner's direction), in short chunks, with the proven one-wheel-back pivot
-				{
-					in_pivot  = 1;
-					pivot_dir = (dir != 0) ? dir : last_pivot_dir;  // centred->000 corners leave NO last side (debounce eats the 1-cycle side blip); assume the same direction as the previous corner - true for an S/180 made of same-direction 90s
-					pivot_seen_lost = 1;                 // already past the old line: exit at the next centred 010
-					if(pivot_min_count == 0) pivot_min_count = LOST_SEARCH_CHUNK;  // rotate in short chunks so finding the line mid-chunk overshoots at most ~1 chunk
-					base_speed = 0;
-				}
-				else                                     // phase 4: give up (or no known side) -> stop searching, just balance on the spot
-				{
-					correction = 0;
-					base_speed = 0;
-					in_pivot = 0;
-					pivot_min_count = 0;
-					pivot_seen_lost = 0;
-					pivot_dir = 0;
-				}
+				/* TEMPORARY BALANCE MODE: with no line, just balance on the spot - do
+				 * NOT drive forward / reverse / search (that was the "no line -> charge
+				 * forward" behaviour). Resume line-following only when black is seen. */
+				base_speed      = 0;
+				correction      = 0;
+				in_pivot        = 0;
+				pivot_min_count = 0;
+				pivot_seen_lost = 0;
+				pivot_dir       = 0;
+				was_lost        = 1;   // re-acquire via the upright gate when the line returns
+				was_hard        = 0;
+				center_count    = 0;
+				straight_corr   = 0;
+				reached_center  = 0;
 			}
 			else if(in_pivot && ir_error != 0)       // the 000-pivot caught the line OFF-centre: keep rotating (same latched direction) until it reaches the centre sensor
 			{
@@ -270,22 +250,47 @@ int EXTI0_IRQHandler(void)
 				lost_count = 0;
 				straight_corr = 0;
 			}
-			else if(ir_error != 0)                   // 110/011: fresh in-place turn (strong), or post-turn fine-align (gentle)
+			else if(ir_error != 0)                   // ANY off-centre (011/110 = ~75deg, 001/100 = ~90deg) -> STEPPED tank pivot: small turn -> rebalance -> small turn ...
 			{
-				if(was_hard && reached_center && myabs(ir_error) < 2)  // gentle fine-align for slight +-1 drifts ONLY
-					correction = (ir_error > 0 ? 1 : -1) * IR_FINE_KP;
-				/* else: keep the strong IR_GetCorrection() from above. +-2 is NEVER
-				 * fine-align - it's the line fully off the middle. */
-				base_speed = (myabs(ir_error) >= 2) ? 0 : LINE_DRIFT_SPEED;  // +-2: STOP and steer hard in place - a real corner goes 000 within a few cycles and the 000 pivot takes over; +-1: keep creeping
-				center_count = 0;
-				was_lost = 0;
-				was_hard = 1;                        // a turn happened -> settle (brake + upright gate) when we re-centre
-				lost_count = 0;
-				straight_corr = (ir_error > 0) ? STRAIGHT_TRIM : -STRAIGHT_TRIM;  // seed the fading residual toward this side
+				if(pivot_pause > 0)                  // between steps: balance on the spot, don't rotate yet (let the body recover)
+				{
+					in_pivot      = 0;
+					base_speed    = 0;
+					correction    = 0;
+					center_count  = 0;
+					was_lost      = 0;
+					was_hard      = 1;
+					did_hard_turn = 1;
+				}
+				else                                 // start ONE small pivot step
+				{
+					in_pivot        = 1;                 // HARD_TURN_TANK_PIVOT (absolute reverse on the inner wheel)
+					pivot_dir       = (ir_error > 0) ? 1 : -1;
+					pivot_seen_lost = 1;                 // exit at the next centred 010
+					if(pivot_min_count == 0) pivot_min_count = PIVOT_STEP_CYCLES;  // small step length
+					base_speed      = 0;                 // rotate on the spot, no forward creep
+					center_count    = 0;
+					was_lost        = 0;
+					was_hard        = 1;
+					did_hard_turn   = 1;                 // arms the post-turn backup
+					lost_count      = 0;
+					straight_corr   = 0;
+				}
 			}
 			else                                     // centred (010)
 			{
 				lost_count = 0;
+
+				/* OVER-ROTATE: a pivot that first reaches centre is usually still under-
+				 * rotated (the middle sensor catches the new line before the heading has
+				 * fully turned). Keep spinning PIVOT_OVERROTATE more cycles (one-shot) so
+				 * the heading finishes the corner, instead of exiting and drifting off. */
+				if(in_pivot && pivot_dir != 0 && !overrot_done)
+				{
+					pivot_min_count = PIVOT_OVERROTATE;
+					overrot_done    = 1;
+				}
+
 				if(in_pivot && (pivot_min_count > 0 || !pivot_seen_lost) && pivot_dir != 0)
 				{
 					base_speed = 0;                  // still clearing the old line; rotate via PIVOT_OUTER/PIVOT_INNER, don't resume forward yet
@@ -301,6 +306,17 @@ int EXTI0_IRQHandler(void)
 					pivot_min_count = 0;
 					pivot_seen_lost = 0;
 					pivot_dir = 0;
+					overrot_done = 0;                // re-arm over-rotation for the next turn
+
+					/* A real turn just finished and we're back at centre -> reverse a
+					 * moment before driving on (the "turn-then-backup"); the END-of-block
+					 * override does the actual reverse. */
+					if(did_hard_turn && post_turn_back == 0)
+					{
+						post_turn_back = POST_TURN_BACK_CYCLES;
+						did_hard_turn  = 0;
+					}
+
 					correction = straight_corr;      // gentle fading steering toward the last drift side (anti-sawtooth)
 					straight_corr = straight_corr * 3 / 4;   // decay toward 0 the longer it stays centred
 
@@ -321,6 +337,16 @@ int EXTI0_IRQHandler(void)
 				}
 			}
 
+			/* Post-turn backup: while the reverse window is active (armed at the centred-
+			 * resume point below, right after a real turn finishes), hold straight - no
+			 * pivot, no steer. The reverse command itself is applied at the END of this
+			 * block so the exit-brake can't overwrite it. */
+			if(post_turn_back > 0)
+			{
+				in_pivot   = 0;
+				correction = 0;
+			}
+
 			Move_Target_Cmd = base_speed;            // line-follower drives the forward command
 
 			/* Active exit-brake: while still settling after a hard turn (was_hard),
@@ -328,6 +354,7 @@ int EXTI0_IRQHandler(void)
 			 * bot rushes off. Counter it by commanding REVERSE proportional to the
 			 * measured forward translation (encoder sum), via the velocity loop
 			 * (balance-consistent, won't pitch it over). Self-cancels once stopped. */
+			/* TEMP DISABLED (no exit-brake): uncomment to re-enable post-turn braking.
 			if(was_hard)
 			{
 				int esum  = Encoder_Left + Encoder_Right;
@@ -337,16 +364,33 @@ int EXTI0_IRQHandler(void)
 				if(brake < -EXIT_BRAKE_MAX) brake = -EXIT_BRAKE_MAX;
 				Move_Target_Cmd = brake;
 			}
+			*/
 
-			/* Climb slowdown: ONLY after the detector has armed (a full-speed climb
-			 * already reached SEESAW_CLIMB_PITCH and latched). Slowing earlier - while
-			 * the pitch was still rising toward the arm angle - robbed the push so the
-			 * pitch never reached 17 and it never armed (never switched to balance).
-			 * Gating on the latch keeps arming at full speed, then slows the run-in to
-			 * the tip so there's less momentum/integral to fling the bot. Caps only a
-			 * FORWARD command above the cap; brakes and flat-ground speed untouched. */
-			if(Seesaw_Armed && Move_Target_Cmd > SEESAW_CLIMB_SPEED)
+			/* Climb DRIVE (solution a): once the seesaw is ARMED (a real climb confirmed),
+			 * drive forward at SEESAW_CLIMB_SPEED instead of the slow line-follow base
+			 * speed - a 30% slope can't be climbed at LINE_BASE_SPEED=1. Skipped while
+			 * tipping (tip_brake) so the anti-dive can still cut forward at the crest. */
+			if(Seesaw_Armed && !tip_brake)
 				Move_Target_Cmd = SEESAW_CLIMB_SPEED;
+
+			/* Post-turn backup has the FINAL say: reverse after a turn (overrides the
+			 * forward base speed and the exit-brake which would otherwise zero it). */
+			if(post_turn_back > 0)
+			{
+				Move_Target_Cmd = -POST_TURN_BACK_SPEED;
+				post_turn_back--;
+			}
+
+			/* Sub-1 forward creep: LINE_BASE_SPEED is an integer (min 1). To go SLOWER
+			 * than 1, let a FORWARD command through only 1 cycle in every LINE_SPEED_DIV
+			 * (average forward speed = LINE_BASE_SPEED / LINE_SPEED_DIV). Reverse/stop
+			 * are untouched. LINE_SPEED_DIV = 1 -> no change. */
+			{
+				static u8 spd_div = 0;
+				if(++spd_div >= LINE_SPEED_DIV) spd_div = 0;
+				if(Move_Target_Cmd > 0 && spd_div != 0)
+					Move_Target_Cmd = 0;
+			}
 		}
 		else
 		{
@@ -550,7 +594,7 @@ Output  : Balance PWM value
 **************************************************************************/
 int Balance(float Angle, float Gyro)
 {
-	float Balance_Kp = 500, Balance_Kd = 1.5;  
+	float Balance_Kp = 300, Balance_Kd = 1.2;  
 	float Angle_bias, Gyro_bias;
 	int   balance;
 
