@@ -250,7 +250,24 @@ int EXTI0_IRQHandler(void)
 				lost_count = 0;
 				straight_corr = 0;
 			}
-			else if(ir_error != 0)                   // ANY off-centre (011/110 = ~75deg, 001/100 = ~90deg) -> STEPPED tank pivot: small turn -> rebalance -> small turn ...
+			else if(myabs(ir_error) == 1)            // slight drift (011/110): GENTLE moving ARC, NOT an in-place pivot.
+			{
+				/* Pivoting on every small drift was the big curve oscillation: the bot
+				 * stop-spun toward the line, overshot, then spun back (一頓一頓的折線).
+				 * Here it KEEPS creeping forward and lets the one-wheel mixing below
+				 * (correction from IR_GetCorrection) steer it smoothly back to centre.
+				 * Only a FULL off-centre (+-2) or all-white (000) corner pivots now -
+				 * this matches the graded design documented in ir_tracker.h. */
+				in_pivot      = 0;                   // no tank pivot for a small drift
+				base_speed    = LINE_DRIFT_SPEED;    // keep moving while steering (small curves flow)
+				/* correction (IR PD term) is left as read -> gentle one-wheel mixing arcs back */
+				center_count  = 0;
+				was_lost      = 0;
+				was_hard      = 0;
+				lost_count    = 0;
+				straight_corr = correction;          // seed the anti-sawtooth fade for when it re-centres
+			}
+			else if(ir_error != 0)                   // FULLY off to one side (001/100 = ~90deg) -> STEPPED tank pivot: small turn -> rebalance -> small turn ...
 			{
 				if(pivot_pause > 0)                  // between steps: balance on the spot, don't rotate yet (let the body recover)
 				{
@@ -594,7 +611,7 @@ Output  : Balance PWM value
 **************************************************************************/
 int Balance(float Angle, float Gyro)
 {
-	float Balance_Kp = 300, Balance_Kd = 1.2;  
+	float Balance_Kp = 350, Balance_Kd = 1.5;
 	float Angle_bias, Gyro_bias;
 	int   balance;
 
@@ -620,7 +637,7 @@ Output  : Velocity control PWM value
 int Velocity(int encoder_left, int encoder_right)
 {
 #ifdef DEBUG_BALANCE_ONLY
-	float Velocity_Kp = -200,    Velocity_Ki = -0.4;             // DEBUG: speed loop truly OFF -> pure balance (isolation test). (Was -160/-0.8 by mistake, i.e. NOT off.)
+	float Velocity_Kp = -160,    Velocity_Ki = -0.4;             // DEBUG: speed loop truly OFF -> pure balance (isolation test). (Was -160/-0.8 by mistake, i.e. NOT off.)
 #else
 	/* Mode-dependent proportional gain: lighter while FLAT line-following
 	 * (VELOCITY_KP_TRACK, the proven 循跡 value), heavier on a slope / in balance

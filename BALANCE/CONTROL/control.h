@@ -9,8 +9,8 @@
  *                         so the bot does not run away forward while tracking (this is
  *                         the setpoint the working 循跡 build used).
  * The active value is selected each cycle in EXTI0_IRQHandler (see Track_Mode). */
-#define Middle_angle        8.3f
-#define MIDDLE_ANGLE_TRACK  8.3f   /* TEST: =Middle_angle, so the setpoint no longer switches (was 7.1). If the forward surge stops, the 7.1 line-follow setpoint was the cause and 9.0 is this bot's true balance point. */
+#define Middle_angle        8.1f
+#define MIDDLE_ANGLE_TRACK  8.1f   /* TEST: =Middle_angle, so the setpoint no longer switches (was 7.1). If the forward surge stops, the 7.1 line-follow setpoint was the cause and 9.0 is this bot's true balance point. */
 
 /* Fine trim (degrees) added on top of the runtime-calibrated Balance_Target.
  * The jig may hold the bot slightly off the true balance point, leaving an
@@ -28,7 +28,7 @@
  * every non-zero control output so the motor reacts to small tilts too.
  * Tune: raise if it still won't move at small angles; lower if it buzzes /
  * twitches / oscillates while standing near upright. Set to 0 to disable. */
-#define MOTOR_DEADZONE 450
+#define MOTOR_DEADZONE 380
 
 /* ===== Forward-motion tuning (balance WHILE moving) ===================== */
 
@@ -63,13 +63,13 @@
  *                       If the climb still lacks force, make it MORE negative (-1.8/
  *                       -2.0) or raise the integral clamp in control.c. If flat
  *                       driving hunts/launches, back off toward -1.0. */
-#define VELOCITY_KI       -0.6f
+#define VELOCITY_KI       -0.4f
 #define VELOCITY_KI_CLIMB -1.5f
 
 /* Speed-loop proportional gain (damping) - applied MODE-DEPENDENTLY (see Track_Mode):
  *   VELOCITY_KP_TRACK : while FLAT line-following (the proven 循跡 value).
  *   VELOCITY_KP_BAL   : while balancing / on a slope / descending (more damping). */
-#define VELOCITY_KP_TRACK (-160)
+#define VELOCITY_KP_TRACK (-140)
 #define VELOCITY_KP_BAL   (-150)
 
 /* ===== Seesaw (蹺蹺板) tip-over handling ================================ */

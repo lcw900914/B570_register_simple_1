@@ -13,13 +13,13 @@
  * IR_KP kept SMALL so a turn is a mild wheel-speed difference (the bot arcs at
  * constant speed), NOT a fast in-place spin. Raise a little if it can't make a
  * corner; lower if it weaves/over-steers. */
-#define IR_KP 1900   /* raised from 1400: gentle curves were sometimes under-steered and slipped off */
+#define IR_KP 1500   /* raised from 1400: gentle curves were sometimes under-steered and slipped off */
 #define IR_KD 100
 
 /* Hard cap on the PD steering term (PWM). Keeps the +-2 spike (~2*IR_KP) from
  * net-pushing the bot forward through the one-wheel mixing during the pivot-entry
  * window. Must stay >= IR_KP so +-1 curve steering is never clipped. */
-#define IR_CORRECTION_MAX 2000
+#define IR_CORRECTION_MAX 3000
 
 /* Fine-alignment gain used ONLY in the settle window right after a big turn:
  * a small, gentle nudge so the bot trims itself dead-centre on the line without
@@ -54,8 +54,8 @@
  *   - spins past the line / left-right oscillation -> lower BOTH
  *   - want it to keep advancing through the corner -> raise PIVOT_OUTER only
  * Each must beat ~MOTOR_DEADZONE + balance PWM for that wheel to actually drive. */
-#define PIVOT_OUTER 550   /* OUTSIDE wheel: driven at common_pwm + this (forward push, still carries the balance term) */
-#define PIVOT_INNER 900   /* INSIDE (line-side) wheel: driven at a FIXED -PIVOT_INNER (absolute reverse). EQUAL to PIVOT_OUTER -> pure in-place spin (一前一後速度相同): one wheel +2000, the other -2000, no net forward/backward creep. The bot rotates on the spot, then resumes slow forward once re-centred. If it now OVERSHOOTS the corner (no longer pulled back), raise PIVOT_INNER a little above PIVOT_OUTER; if it turns too slowly, raise BOTH together */
+#define PIVOT_OUTER 1000   /* OUTSIDE wheel: driven at common_pwm + this (forward push, still carries the balance term) */
+#define PIVOT_INNER 1500   /* INSIDE (line-side) wheel: driven at a FIXED -PIVOT_INNER (absolute reverse). EQUAL to PIVOT_OUTER -> pure in-place spin (一前一後速度相同): one wheel +2000, the other -2000, no net forward/backward creep. The bot rotates on the spot, then resumes slow forward once re-centred. If it now OVERSHOOTS the corner (no longer pulled back), raise PIVOT_INNER a little above PIVOT_OUTER; if it turns too slowly, raise BOTH together */
 
 /* Per-direction pivot strength trim (%), to even out a LEFT/RIGHT motor strength
  * mismatch. During a pivot only one motor does the forward work, so any
@@ -76,7 +76,7 @@
  * 6 -> 8: the ramp is soft cardboard that SAGS (gets steeper) under the bot,
  * so it needs entry momentum to punch through before the sag develops.
  * If corners start overshooting, drop back to 6. */
-#define LINE_BASE_SPEED 1
+#define LINE_BASE_SPEED 2
 
 /* Sub-1 forward creep divider: a forward command is let through only 1 cycle in
  * every LINE_SPEED_DIV, so the AVERAGE forward speed = LINE_BASE_SPEED /
@@ -102,14 +102,14 @@
  *   cycles >= LOST_GIVEUP_CYCLES  : phase 4, give up -> stop searching, balance on spot
  * ~10ms per cycle. A 000 that starts DURING a pivot skips the backup (rotation is the
  * right recovery between the old and new line). */
-#define LOST_ARC_CYCLES    2     /* ~20ms grace before recovery (was 6). Every grace cycle is coasting distance carried PAST the corner - the track has no line gaps to glide over, so commit to the pivot almost immediately */
-#define LOST_BACKUP_CYCLES 90    /* reverse from cycle 6 to ~90 (~0.84s) to bring the overrun corner back under the sensors */
-#define LINE_BACKUP_SPEED  3     /* reverse speed target while backing up (same units as LINE_BASE_SPEED) */
+#define LOST_ARC_CYCLES    1     /* ~20ms grace before recovery (was 6). Every grace cycle is coasting distance carried PAST the corner - the track has no line gaps to glide over, so commit to the pivot almost immediately */
+#define LOST_BACKUP_CYCLES 70    /* reverse from cycle 6 to ~90 (~0.84s) to bring the overrun corner back under the sensors */
+#define LINE_BACKUP_SPEED  1     /* reverse speed target while backing up (same units as LINE_BASE_SPEED) */
 
 /* Post-turn backup: after EVERY turn (pivot) finishes, reverse for this many
  * cycles (10ms each) at POST_TURN_BACK_SPEED before resuming forward, so the bot
  * re-seats on the line after a corner. 100 = ~1s. Set CYCLES 0 to disable. */
-#define POST_TURN_BACK_CYCLES 0    /* TEMP DISABLED: no post-turn backup (was 20). Set back to ~20-100 to re-enable. */
+#define POST_TURN_BACK_CYCLES 30    /* TEMP DISABLED: no post-turn backup (was 20). Set back to ~20-100 to re-enable. */
 #define POST_TURN_BACK_SPEED  1
 
 /* STEPPED big turn: instead of one continuous spin, a turn is done as a series of
@@ -120,15 +120,15 @@
  *   PIVOT_PAUSE_CYCLES : balance-on-the-spot pause between steps (10ms each).
  *                        Bigger = more time to stabilise before the next step.
  * (A ~90deg turn ends up as roughly turn_total / PIVOT_STEP_CYCLES steps.) */
-#define PIVOT_STEP_CYCLES   7
-#define PIVOT_PAUSE_CYCLES  20
+#define PIVOT_STEP_CYCLES   8
+#define PIVOT_PAUSE_CYCLES  12
 
 /* Over-rotation: once a pivot first reaches centre, spin this many MORE cycles
  * (10ms each) before exiting, so the heading finishes the corner (~90deg) instead
  * of stopping under-rotated (~75deg) and drifting off the line. Too big = it
  * over-shoots the line to the other side and has to correct back (oscillation);
  * too small = still exits under-rotated. */
-#define PIVOT_OVERROTATE 6
+#define PIVOT_OVERROTATE 0
 #define LOST_GIVEUP_CYCLES 250   /* ~2.5s total before giving up */
 #define LOST_SEARCH_CHUNK  10    /* search rotates in ~100ms pivot chunks; finding the line mid-chunk overshoots at most the chunk remainder */
 
@@ -183,13 +183,14 @@
  * 0   = inner wheel gets no steering term (best for "inside wheel almost stops")
  * 50  = inner wheel gets half the normal reverse steering
  * 100 = same as normal symmetric steering
- * SET TO 100 (原地轉): the inside wheel now reverses by the SAME amount the
- * outside wheel drives forward, so a steering correction is a true in-place
- * rotation (一前一後速度相同) instead of a wide forward arc. Slow forward creep
- * still comes from LINE_DRIFT_SPEED / the post-turn resume. Lower back toward 50
- * if slight (+-1) drifts make it weave/oscillate on the straight.
+ * SET TO 40 (溫和畫弧): on a slight (+-1) drift the inside wheel only SLOWS
+ * (does not reverse), so the bot ARCS forward back onto the line instead of
+ * stop-spinning in place - this kills the curve weave/oscillation (轉彎大波動).
+ * Sharp corners (+-2 / 000) still tank-pivot via PIVOT_OUTER/INNER, which are
+ * NOT affected by this value. Raise back toward 100 for a tighter (more in-place)
+ * +-1 turn; lower toward 0 for an even gentler arc if it still weaves.
  */
-#define STEER_INNER_PERCENT 100
+#define STEER_INNER_PERCENT 40
 
 /* Outside-wheel steering strength when STEER_PIVOT_ONE_WHEEL is enabled.
  * 100 = outside wheel gets the normal correction
