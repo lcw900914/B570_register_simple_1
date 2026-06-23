@@ -611,7 +611,7 @@ Output  : Balance PWM value
 **************************************************************************/
 int Balance(float Angle, float Gyro)
 {
-	float Balance_Kp = 350, Balance_Kd = 1.5;
+	float Balance_Kp = 300, Balance_Kd = 1.2;
 	float Angle_bias, Gyro_bias;
 	int   balance;
 
@@ -637,7 +637,7 @@ Output  : Velocity control PWM value
 int Velocity(int encoder_left, int encoder_right)
 {
 #ifdef DEBUG_BALANCE_ONLY
-	float Velocity_Kp = -160,    Velocity_Ki = -0.4;             // DEBUG: speed loop truly OFF -> pure balance (isolation test). (Was -160/-0.8 by mistake, i.e. NOT off.)
+	float Velocity_Kp = -100,    Velocity_Ki = -0.4;             // DEBUG: speed loop truly OFF -> pure balance (isolation test). (Was -160/-0.8 by mistake, i.e. NOT off.)
 #else
 	/* Mode-dependent proportional gain: lighter while FLAT line-following
 	 * (VELOCITY_KP_TRACK, the proven 循跡 value), heavier on a slope / in balance

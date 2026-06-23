@@ -90,5 +90,10 @@ B570_register_simple_1/
 - `v0.4` 上坡 — 加大推力，爬得上蹺蹺板。
 - `v1.0` 上下坡 — 蹺蹺板上下坡自動切換、下坡控速，完整功能。
 - `最終版1` 循跡過彎優化 — 把輕微偏移從原地轉改成溫和畫弧（`STEER_INNER_PERCENT` 100→40），解決轉彎時車身大幅波動的問題。
+- `最終版` 整體調校（這版）— 平衡反應調柔、過彎更穩：
+  - 直立環：`Balance_Kp` 350→300、`Balance_Kd` 1.5→1.2（反應更柔不抖）。
+  - 中點 / 死區：`Middle_angle` 8.1→7.3、`BALANCE_TRIM` 0→0.3、`MOTOR_DEADZONE` 380→450。
+  - 速度環：`VELOCITY_KP_TRACK` -140→-100、`VELOCITY_KP_BAL` -150→-120（減弱、較不易暴衝）。
+  - 過彎：`PIVOT_STEP_CYCLES` 8→12、`PIVOT_PAUSE_CYCLES` 12→20（每步轉久、步間多停一下穩住）、`PIVOT_INNER` 1500→1200（內輪反轉力道減小）、`STEER_INNER_PERCENT` 40→50、`POST_TURN_BACK_SPEED` 1→0（過彎後不倒退）、`LOST_BACKUP_CYCLES` 70→90（失線倒退時間加長）。
 
 每個階段的細節看 commit 紀錄跟 DEBUG.md。

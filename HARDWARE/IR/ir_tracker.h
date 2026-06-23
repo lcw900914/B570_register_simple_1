@@ -55,7 +55,7 @@
  *   - want it to keep advancing through the corner -> raise PIVOT_OUTER only
  * Each must beat ~MOTOR_DEADZONE + balance PWM for that wheel to actually drive. */
 #define PIVOT_OUTER 1000   /* OUTSIDE wheel: driven at common_pwm + this (forward push, still carries the balance term) */
-#define PIVOT_INNER 1500   /* INSIDE (line-side) wheel: driven at a FIXED -PIVOT_INNER (absolute reverse). EQUAL to PIVOT_OUTER -> pure in-place spin (一前一後速度相同): one wheel +2000, the other -2000, no net forward/backward creep. The bot rotates on the spot, then resumes slow forward once re-centred. If it now OVERSHOOTS the corner (no longer pulled back), raise PIVOT_INNER a little above PIVOT_OUTER; if it turns too slowly, raise BOTH together */
+#define PIVOT_INNER 1200   /* INSIDE (line-side) wheel: driven at a FIXED -PIVOT_INNER (absolute reverse). EQUAL to PIVOT_OUTER -> pure in-place spin (一前一後速度相同): one wheel +2000, the other -2000, no net forward/backward creep. The bot rotates on the spot, then resumes slow forward once re-centred. If it now OVERSHOOTS the corner (no longer pulled back), raise PIVOT_INNER a little above PIVOT_OUTER; if it turns too slowly, raise BOTH together */
 
 /* Per-direction pivot strength trim (%), to even out a LEFT/RIGHT motor strength
  * mismatch. During a pivot only one motor does the forward work, so any
@@ -103,14 +103,14 @@
  * ~10ms per cycle. A 000 that starts DURING a pivot skips the backup (rotation is the
  * right recovery between the old and new line). */
 #define LOST_ARC_CYCLES    1     /* ~20ms grace before recovery (was 6). Every grace cycle is coasting distance carried PAST the corner - the track has no line gaps to glide over, so commit to the pivot almost immediately */
-#define LOST_BACKUP_CYCLES 70    /* reverse from cycle 6 to ~90 (~0.84s) to bring the overrun corner back under the sensors */
+#define LOST_BACKUP_CYCLES 90    /* reverse from cycle 6 to ~90 (~0.84s) to bring the overrun corner back under the sensors */
 #define LINE_BACKUP_SPEED  1     /* reverse speed target while backing up (same units as LINE_BASE_SPEED) */
 
 /* Post-turn backup: after EVERY turn (pivot) finishes, reverse for this many
  * cycles (10ms each) at POST_TURN_BACK_SPEED before resuming forward, so the bot
  * re-seats on the line after a corner. 100 = ~1s. Set CYCLES 0 to disable. */
 #define POST_TURN_BACK_CYCLES 30    /* TEMP DISABLED: no post-turn backup (was 20). Set back to ~20-100 to re-enable. */
-#define POST_TURN_BACK_SPEED  1
+#define POST_TURN_BACK_SPEED  0
 
 /* STEPPED big turn: instead of one continuous spin, a turn is done as a series of
  * small pivot STEPS with a rebalance PAUSE between each, so the body recovers its
@@ -120,8 +120,8 @@
  *   PIVOT_PAUSE_CYCLES : balance-on-the-spot pause between steps (10ms each).
  *                        Bigger = more time to stabilise before the next step.
  * (A ~90deg turn ends up as roughly turn_total / PIVOT_STEP_CYCLES steps.) */
-#define PIVOT_STEP_CYCLES   8
-#define PIVOT_PAUSE_CYCLES  12
+#define PIVOT_STEP_CYCLES   12
+#define PIVOT_PAUSE_CYCLES  20
 
 /* Over-rotation: once a pivot first reaches centre, spin this many MORE cycles
  * (10ms each) before exiting, so the heading finishes the corner (~90deg) instead
@@ -190,7 +190,7 @@
  * NOT affected by this value. Raise back toward 100 for a tighter (more in-place)
  * +-1 turn; lower toward 0 for an even gentler arc if it still weaves.
  */
-#define STEER_INNER_PERCENT 40
+#define STEER_INNER_PERCENT 50
 
 /* Outside-wheel steering strength when STEER_PIVOT_ONE_WHEEL is enabled.
  * 100 = outside wheel gets the normal correction
